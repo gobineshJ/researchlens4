@@ -1,0 +1,94 @@
+"""
+Orchestrates the full flow: parse files -> discover pages -> Groq filter
+-> scrape selected pages -> chunk -> embed/store -> retrieve -> Groq
+generate -> PDF export. Every stage's evaluation check runs inline, so
+the returned result always includes a real evaluation report, not a
+separate afterthought.
+"""
+
+import uuid
+
+from . import doc_parser, scraper, groq_client, chunker, vectorstore, pdf_export, evaluation
+from .config import TOP_K_CHUNKS
+
+
+def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str) -> dict:
+    report = evaluation.EvaluationReport()
+    all_records: list[dict] = []
+
+    # --- Stage 1: parse uploaded files ---
+    with report.timed_stage("extraction"):
+        for path in file_paths:
+            all_records.extend(doc_parser.parse_document(path))
+    evaluation.validate_extraction(all_records, report)
+
+    # --- Stage 2: crawl discovery ---
+    all_candidates: list[dict] = []
+    with report.timed_stage("crawl_discovery"):
+        for seed in seed_urls:
+            found = scraper.discover(seed)
+            all_candidates.extend(found)
+            evaluation.validate_crawler(found, seed, report)
+
+    # --- Stage 3: Groq relevance filter ---
+    filtered_candidates: list[dict] = []
+    with report.timed_stage("relevance_filter"):
+        if all_candidates:
+            filtered_candidates = groq_client.filter_relevant_pages(
+                all_candidates, topic=instructions, instructions=instructions
+            )
+
+    # --- Stage 4: scrape only the pages that passed the filter ---
+    web_records: list[dict] = []
+    with report.timed_stage("scraping"):
+        for candidate in filtered_candidates:
+            if candidate.get("relevant"):
+                scraped = scraper.scrape_page(candidate["url"], candidate.get("title", ""))
+                if scraped:
+                    web_records.append(scraped)
+        all_records.extend(web_records)
+
+    # --- Stage 5: chunk everything ---
+    with report.timed_stage("chunking"):
+        chunks = chunker.chunk_all(all_records)
+    evaluation.validate_chunking(chunks, report)
+
+    # --- Stage 6: embed + store in a fresh ChromaDB session collection ---
+    with report.timed_stage("embedding_and_storage"):
+        collection, session_id = vectorstore.new_session_collection()
+        vectorstore.add_chunks(collection, chunks)
+
+    # --- Stage 7: retrieve top-k for the report query (the instructions themselves) ---
+    with report.timed_stage("retrieval"):
+        retrieved = vectorstore.retrieve_top_k(collection, instructions, k=TOP_K_CHUNKS)
+
+    # --- Stage 8: Groq report generation ---
+    generation_result = {"report_text": "", "citations_used": []}
+    with report.timed_stage("generation"):
+        if retrieved:
+            generation_result = groq_client.generate_report(retrieved, instructions)
+    retrieved_labels = [r["source_label"] for r in retrieved]
+    evaluation.validate_generation(
+        generation_result["report_text"], generation_result["citations_used"], retrieved_labels, report
+    )
+
+    # --- Stage 9: PDF export ---
+    pdf_path = None
+    with report.timed_stage("pdf_export"):
+        if generation_result["report_text"]:
+            filename = f"report_{uuid.uuid4().hex[:8]}.pdf"
+            pdf_path = pdf_export.build_pdf(
+                generation_result["report_text"], generation_result["citations_used"], filename
+            )
+
+    return {
+        "extracted_records": len(all_records),
+        "discovered_pages": len(all_candidates),
+        "filtered_pages": [c for c in filtered_candidates if c.get("relevant")],
+        "chunks_created": len(chunks),
+        "retrieved_chunks": retrieved,
+        "report_text": generation_result["report_text"],
+        "citations_used": generation_result["citations_used"],
+        "pdf_path": pdf_path,
+        "evaluation": report.to_dict(),
+    }
