@@ -1,0 +1,24 @@
+# --- Backend (Python) ---
+backend/venv/
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+*.pyc
+*.pyo
+backend/.env
+backend/chroma_store/
+backend/generated_reports/
+
+# --- Frontend (Node) ---
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# --- OS / editor junk ---
+.DS_Store
+Thumbs.db
+.vscode/
+
+# --- Env files anywhere ---
+.env
+*.env.local
