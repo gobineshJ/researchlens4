@@ -136,6 +136,25 @@ Each pipeline stage has a real check, not just a "looks fine" assumption:
 | Generation | Citation markers present in the report, every cited source was actually retrieved (citation accuracy), report cites at least one source (groundedness) |
 | System | Processing time per stage, error count — both surfaced in the evaluation panel |
 
+## Testing
+
+Two kinds of tests, in `backend/tests/`:
+
+- **`tests/unit/`** — no network, no Groq key, runs in under a second. Tests document parsing, chunking (including real overlap between consecutive chunks, not just config), scraper HTML logic, and every evaluation check with both a passing and a genuinely failing case.
+- **`tests/integration/`** — runs the real pipeline against real Groq calls and embeddings. Needs `GROQ_API_KEY` set in `.env`; skips automatically (not an error) if it's missing. Implements deliberate scenario tests: a topic mismatch that should fail retrieval/groundedness on purpose, an image-only PDF that should fail extraction cleanly instead of crashing, and a tiny input smaller than the top-k retrieval count. Two further scenarios (an irrelevant seed URL, a web-only run with no file) hit live URLs and only run if you set `RUN_NETWORK_URL_TESTS=1`, since they're slower and depend on an external page staying up.
+
+Run everything:
+
+```bash
+cd backend
+pip install -r requirements-dev.txt
+pytest tests/unit/ -v          # fast, always safe to run
+pytest tests/integration/ -v   # needs GROQ_API_KEY in .env
+RUN_NETWORK_URL_TESTS=1 pytest tests/integration/ -v   # also hits live URLs
+```
+
+**Automation:** `.github/workflows/backend-tests.yml` runs the unit tests automatically on every push and pull request via GitHub Actions — no setup needed once this repo is on GitHub, since unit tests need no secrets. The integration tests are deliberately left out of that workflow because they need a real Groq key; if you want those automated too, add `GROQ_API_KEY` as a repository secret (Settings → Secrets and variables → Actions) and extend the workflow to pass it through and run `pytest tests/integration/`.
+
 ## Roadmap
 
 This was built in one focused session rather than day-by-day, but functionally covers what the three-day brief asked for:

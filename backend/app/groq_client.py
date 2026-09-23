@@ -14,11 +14,14 @@ this and tell the user exactly what's missing.
 """
 
 import json
+import time
 import requests
 
 from .config import GROQ_API_KEY, GROQ_FILTER_MODEL, GROQ_GENERATION_MODEL
 
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+MAX_RETRIES = 3
+RETRY_BACKOFF_SECONDS = 2  # doubles each retry: 2s, 4s, 8s
 
 
 class GroqNotConfigured(Exception):
@@ -43,17 +46,36 @@ def _call_groq(model: str, system_prompt: str, user_prompt: str, json_mode: bool
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
 
-    response = requests.post(
-        GROQ_ENDPOINT,
-        headers={
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=30,
-    )
-    response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"]
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = requests.post(
+                GROQ_ENDPOINT,
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=30,
+            )
+            response.raise_for_status()
+            return response.json()["choices"][0]["message"]["content"]
+
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            # Transient network issue (firewall/AV resetting the connection,
+            # a dropped Wi-Fi packet, etc.) -- worth retrying a few times
+            # before giving up, rather than failing the whole pipeline on
+            # one bad connection.
+            last_error = exc
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+                continue
+            raise RuntimeError(
+                f"Could not reach Groq after {MAX_RETRIES} attempts "
+                f"(connection kept resetting). This usually means a firewall, "
+                f"antivirus, or network is blocking/interfering with the "
+                f"connection to api.groq.com. Original error: {last_error}"
+            ) from exc
 
 
 def filter_relevant_pages(candidates: list[dict], topic: str, instructions: str) -> list[dict]:

@@ -1,0 +1,32 @@
+name: Backend Unit Tests
+
+# Runs on every push and pull request. Only the UNIT tests run here --
+# they need no Groq key and no internet, so they're safe to automate.
+# Integration tests (tests/integration/) need a real Groq key and network
+# access; run those yourself locally with a .env set up, or add
+# GROQ_API_KEY as a repository secret and extend this workflow if you
+# want those automated too.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run unit tests
+        run: pytest tests/unit/ -v

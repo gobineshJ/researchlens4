@@ -26,7 +26,15 @@ def get_client() -> chromadb.Client:
 
 
 def new_session_collection(session_id: str | None = None):
-    """Creates a fresh, uniquely named collection for one processing session."""
+    """
+    Creates a fresh, uniquely named collection for one processing session.
+    Explicitly uses cosine distance (hnsw:space) rather than ChromaDB's
+    default squared-L2 -- cosine has a standard, interpretable 0-2 range
+    (0 = identical, 1 = unrelated, 2 = opposite) that evaluation.py's
+    retrieval-confidence threshold is calibrated against. Leaving this
+    unset silently falls back to L2, whose scale doesn't match that
+    threshold at all.
+    """
     session_id = session_id or uuid.uuid4().hex[:12]
     client = get_client()
     collection_name = f"session_{session_id}"
@@ -35,7 +43,9 @@ def new_session_collection(session_id: str | None = None):
         client.delete_collection(collection_name)
     except Exception:
         pass
-    return client.create_collection(collection_name), session_id
+    return client.create_collection(
+        collection_name, metadata={"hnsw:space": "cosine"}
+    ), session_id
 
 
 def add_chunks(collection, chunks: list[dict]) -> None:

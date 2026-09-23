@@ -11,8 +11,12 @@ load_dotenv()
 
 # --- Groq ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_FILTER_MODEL = "llama-3.1-8b-instant"       # fast, cheap — used for many small relevance checks
-GROQ_GENERATION_MODEL = "llama-3.3-70b-versatile"  # higher quality — used once per report
+GROQ_FILTER_MODEL = "openai/gpt-oss-20b"       # fast, cheap — used for many small relevance checks
+GROQ_GENERATION_MODEL = "openai/gpt-oss-120b"  # higher quality — used once per report
+# Note: llama-3.1-8b-instant and llama-3.3-70b-versatile (the original choices)
+# were decommissioned by Groq on 2026-08-16. These are Groq's recommended
+# replacements as of this update -- check console.groq.com/docs/deprecations
+# if you hit a 404 again in future, since Groq's free-tier lineup does change.
 
 # --- Crawl / discovery ---
 CRAWL_MAX_DEPTH = 2

@@ -138,7 +138,45 @@ def validate_crawler(candidates: list[dict], seed_url: str, report: EvaluationRe
     )
 
 
-# ---------- Retrieval (needs labeled data -- run manually against a test set) ----------
+# ---------- Retrieval ----------
+# Precision/Recall/MRR need a labeled test set (see evaluate_retrieval below,
+# unchanged -- still not run automatically). But ChromaDB already returns a
+# similarity distance for every retrieved chunk, and that number is discarded
+# after retrieval without ever being checked. A high distance means "closest
+# match ChromaDB could find was still not very close" -- a real, automatic
+# quality signal that needs no ground truth at all.
+
+RETRIEVAL_DISTANCE_WARNING_THRESHOLD = 1.0  # cosine distance (0=identical, 1=unrelated, 2=opposite)
+# Raised from 0.8 -> 1.0 after real evidence: a confirmed well-grounded,
+# accurately-cited run (see conversation log) produced an average distance
+# of 0.856, which the 0.8 threshold flagged as a false failure. Short
+# instruction-style queries ("focus on X") compared against long paragraph
+# chunks structurally produce higher distances than same-length text pairs
+# would, even for genuinely relevant matches -- this is a property of how
+# sentence embedding models handle length asymmetry, not a sign of a bad
+# match. 1.0 leaves headroom above the observed good-match value while
+# still catching genuinely unrelated retrievals (distance approaching or
+# past the "unrelated" midpoint of the 0-2 cosine range).
+
+def validate_retrieval_confidence(retrieved_chunks: list[dict], report: EvaluationReport):
+    stage = "retrieval"
+    if not retrieved_chunks:
+        report.add_check(stage, "confidence", False, "No chunks retrieved -- nothing to generate from.")
+        return
+
+    distances = [c["distance"] for c in retrieved_chunks if "distance" in c]
+    if not distances:
+        return
+    avg_distance = sum(distances) / len(distances)
+    weak_matches = [d for d in distances if d > RETRIEVAL_DISTANCE_WARNING_THRESHOLD]
+    report.add_check(
+        stage, "confidence", len(weak_matches) == 0,
+        f"Average retrieval distance {avg_distance:.3f}; {len(weak_matches)} of {len(distances)} "
+        f"chunk(s) exceeded the {RETRIEVAL_DISTANCE_WARNING_THRESHOLD} weak-match threshold -- "
+        f"the source material may not actually cover the given instructions well." if weak_matches
+        else f"Average retrieval distance {avg_distance:.3f} -- all chunks within confidence threshold.",
+    )
+
 
 def evaluate_retrieval(retrieved_labels: list[str], relevant_labels: set[str], k: int) -> dict:
     """
@@ -164,9 +202,23 @@ def evaluate_retrieval(retrieved_labels: list[str], relevant_labels: set[str], k
 
 # ---------- Generation ----------
 
-def validate_generation(report_text: str, citations_used: list[str], retrieved_labels: list[str],
+_STOPWORDS = {
+    "the", "a", "an", "and", "or", "but", "of", "to", "in", "on", "for", "with",
+    "is", "are", "was", "were", "be", "been", "this", "that", "these", "those",
+    "it", "its", "as", "by", "at", "from", "which", "their", "has", "have",
+    "can", "also", "such", "into", "than", "then", "not", "no", "so",
+}
+
+
+def _significant_words(text: str) -> set[str]:
+    words = "".join(c.lower() if c.isalnum() else " " for c in text).split()
+    return {w for w in words if len(w) > 3 and w not in _STOPWORDS}
+
+
+def validate_generation(report_text: str, citations_used: list[str], retrieved_chunks: list[dict],
                          report: EvaluationReport):
     stage = "generation"
+    retrieved_labels = [c["source_label"] for c in retrieved_chunks]
 
     has_citations = "[" in report_text and "]" in report_text
     report.add_check(
@@ -181,8 +233,48 @@ def validate_generation(report_text: str, citations_used: list[str], retrieved_l
         f"{len(unknown_citations)} cited source(s) were not among the retrieved chunks.",
     )
 
+    # Groundedness: not just "did it cite something" (too weak -- a report can
+    # cite a source while actually saying something the source never mentions).
+    # Instead, check how much of the report's actual vocabulary shows up
+    # anywhere in the cited chunks' text. This is a coarse proxy (word overlap,
+    # not entailment), but it catches wholesale fabrication or drift far
+    # from the source material, which "citations_used is non-empty" cannot.
+    if not citations_used:
+        report.add_check(stage, "groundedness", False, "Report cites zero sources -- not grounded in retrieved evidence.")
+    else:
+        cited_text = " ".join(c["text"] for c in retrieved_chunks if c["source_label"] in citations_used)
+        source_words = _significant_words(cited_text)
+        report_words = _significant_words(report_text)
+        overlap = len(report_words & source_words) / len(report_words) if report_words else 0.0
+        grounded = overlap >= 0.3
+        report.add_check(
+            stage, "groundedness", grounded,
+            f"{overlap:.0%} of the report's significant vocabulary appears in its cited sources "
+            f"(threshold 30%)." + ("" if grounded else " Low overlap suggests possible drift from source content."),
+        )
+
+
+# ---------- PDF export ----------
+# This replaces an earlier, misdirected check that scanned the RAW extracted
+# document text for typographic punctuation. That was checking the wrong
+# thing: raw extracted text is never written into the PDF -- only the LLM's
+# generated report_text and the citation labels are. This check instead
+# verifies the text that actually gets rendered, after pdf_export's own
+# sanitization step, so it's a real regression check on the output rather
+# than a check that fails on every academic PDF regardless of correctness.
+
+_PROBLEM_CHARS = set("\u2010\u2011\u2012\u2013\u2014\u2018\u2019\u201c\u201d\u2026")
+
+
+def validate_pdf_encoding_safety(sanitized_report_text: str, sanitized_citations: list[str],
+                                  report: EvaluationReport):
+    stage = "pdf_export"
+    combined = sanitized_report_text + " ".join(sanitized_citations)
+    found = _PROBLEM_CHARS & set(combined)
     report.add_check(
-        stage, "groundedness", len(citations_used) > 0,
-        f"Report cites {len(citations_used)} distinct source(s)." if citations_used
-        else "Report cites zero sources -- likely not grounded in retrieved evidence.",
+        stage, "encoding_safety", len(found) == 0,
+        "No unrenderable typographic characters remain in the text actually written to the PDF."
+        if not found else
+        f"Sanitization missed character(s) {found} -- these will render as blank boxes in the output PDF.",
     )
+
