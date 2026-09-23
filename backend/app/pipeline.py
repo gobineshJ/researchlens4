@@ -7,6 +7,7 @@ separate afterthought.
 """
 
 import uuid
+from pathlib import Path
 
 from . import doc_parser, scraper, groq_client, chunker, vectorstore, pdf_export, evaluation
 from .config import TOP_K_CHUNKS
@@ -61,15 +62,15 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
     # --- Stage 7: retrieve top-k for the report query (the instructions themselves) ---
     with report.timed_stage("retrieval"):
         retrieved = vectorstore.retrieve_top_k(collection, instructions, k=TOP_K_CHUNKS)
+    evaluation.validate_retrieval_confidence(retrieved, report)
 
     # --- Stage 8: Groq report generation ---
     generation_result = {"report_text": "", "citations_used": []}
     with report.timed_stage("generation"):
         if retrieved:
             generation_result = groq_client.generate_report(retrieved, instructions)
-    retrieved_labels = [r["source_label"] for r in retrieved]
     evaluation.validate_generation(
-        generation_result["report_text"], generation_result["citations_used"], retrieved_labels, report
+        generation_result["report_text"], generation_result["citations_used"], retrieved, report
     )
 
     # --- Stage 9: PDF export ---
@@ -79,6 +80,13 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
             filename = f"report_{uuid.uuid4().hex[:8]}.pdf"
             pdf_path = pdf_export.build_pdf(
                 generation_result["report_text"], generation_result["citations_used"], filename
+            )
+            # Verify against the SAME sanitization pdf_export just applied,
+            # so this checks the actual rendered output, not the raw input.
+            evaluation.validate_pdf_encoding_safety(
+                pdf_export._sanitize_for_pdf(generation_result["report_text"]),
+                [pdf_export._sanitize_for_pdf(c) for c in generation_result["citations_used"]],
+                report,
             )
 
     return {
@@ -90,5 +98,9 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
         "report_text": generation_result["report_text"],
         "citations_used": generation_result["citations_used"],
         "pdf_path": pdf_path,
+        # Just the filename, OS-agnostic -- the frontend uses this directly
+        # for the download link instead of trying to parse pdf_path itself,
+        # which broke on Windows because it uses backslashes, not "/".
+        "pdf_filename": Path(pdf_path).name if pdf_path else None,
         "evaluation": report.to_dict(),
     }

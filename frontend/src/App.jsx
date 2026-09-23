@@ -127,10 +127,10 @@ function ResultsPanel({ result, apiBase }) {
         </div>
       )}
 
-      {result.pdf_path && (
+      {result.pdf_filename && (
         <a
           style={styles.downloadLink}
-          href={`${apiBase}/download/${result.pdf_path.split("/").pop()}`}
+          href={`${apiBase}/download/${result.pdf_filename}`}
         >
           Download PDF report
         </a>
