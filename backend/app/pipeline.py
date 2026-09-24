@@ -9,8 +9,8 @@ separate afterthought.
 import uuid
 from pathlib import Path
 
-from . import doc_parser, scraper, groq_client, chunker, vectorstore, pdf_export, evaluation
-from .config import TOP_K_CHUNKS, TOP_K_CHUNKS_PER_SOURCE
+from . import doc_parser, scraper, groq_client, chunker, vectorstore, pdf_export, evaluation, reranker
+from .config import TOP_K_CHUNKS, TOP_K_CHUNKS_PER_SOURCE, CANDIDATE_OVERSAMPLE_FACTOR
 
 
 def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str) -> dict:
@@ -59,19 +59,39 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
         collection, session_id = vectorstore.new_session_collection()
         vectorstore.add_chunks(collection, chunks)
 
-    # --- Stage 7: retrieve for the report query (the instructions themselves) ---
-    # With more than one source document, retrieve separately PER document
-    # rather than one global top-k -- otherwise chunks from a document that
-    # simply ranks lower for this query can be dropped entirely, even
-    # though the user explicitly asked to cover every uploaded document.
+    # --- Stage 7: retrieve for the report query ---
+    # Three things happen here, in order:
+    #   1. Query expansion -- the raw instructions get rewritten into a
+    #      few more specific search queries (falls back to just the
+    #      original instructions if Groq is unavailable).
+    #   2. Oversampled retrieval PER SOURCE DOCUMENT -- guarantees every
+    #      uploaded file/page gets its own candidate pool, so reranking
+    #      in step 3 can't silently squeeze an entire document out the
+    #      way one global top-k used to.
+    #   3. Reranking -- a cross-encoder re-scores each source's candidate
+    #      pool against the ORIGINAL instructions (expansion was only for
+    #      building a diverse pool, not for scoring) and keeps the best
+    #      few per source. Falls back to distance-sorted results if the
+    #      reranker model can't load.
     with report.timed_stage("retrieval"):
         source_names = sorted({c["source_name"] for c in chunks})
-        if len(source_names) > 1:
-            retrieved = vectorstore.retrieve_top_k_per_source(
-                collection, instructions, source_names, k_per_source=TOP_K_CHUNKS_PER_SOURCE
-            )
+        expanded_queries = groq_client.expand_query(instructions)
+        multi_source = len(source_names) > 1
+        final_k = TOP_K_CHUNKS_PER_SOURCE if multi_source else TOP_K_CHUNKS
+        oversample_k = final_k * CANDIDATE_OVERSAMPLE_FACTOR
+
+        retrieved: list[dict] = []
+        if multi_source:
+            for name in source_names:
+                candidates = vectorstore.retrieve_candidates(
+                    collection, expanded_queries, k_per_query=oversample_k, source_name=name
+                )
+                retrieved.extend(reranker.rerank_with_fallback(instructions, candidates, top_k=final_k))
         else:
-            retrieved = vectorstore.retrieve_top_k(collection, instructions, k=TOP_K_CHUNKS)
+            candidates = vectorstore.retrieve_candidates(
+                collection, expanded_queries, k_per_query=oversample_k
+            )
+            retrieved = reranker.rerank_with_fallback(instructions, candidates, top_k=final_k)
     evaluation.validate_retrieval_confidence(retrieved, report)
     evaluation.validate_source_coverage(source_names, retrieved, report)
 

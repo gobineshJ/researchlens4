@@ -2,9 +2,12 @@
 Thin wrapper around Groq's chat completions endpoint (OpenAI-compatible,
 so plain `requests` is enough -- no extra SDK dependency).
 
-Two jobs:
+Three jobs:
   filter_relevant_pages() -- Day 2: score discovered pages, decide which
                               are worth fully scraping.
+  expand_query()           -- rewrites a short/generic instruction into a
+                              few more specific search queries, so retrieval
+                              isn't stuck matching against one narrow phrasing.
   generate_report()       -- Day 3: turn retrieved chunks into a grounded,
                               citation-aware report.
 
@@ -17,7 +20,7 @@ import json
 import time
 import requests
 
-from .config import GROQ_API_KEY, GROQ_FILTER_MODEL, GROQ_GENERATION_MODEL
+from .config import GROQ_API_KEY, GROQ_FILTER_MODEL, GROQ_GENERATION_MODEL, QUERY_EXPANSION_VARIANTS
 
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 MAX_RETRIES = 3
@@ -116,6 +119,44 @@ def filter_relevant_pages(candidates: list[dict], topic: str, instructions: str)
             "reason": decision.get("reason", ""),
         })
     return results
+
+
+def expand_query(instructions: str, num_variants: int = QUERY_EXPANSION_VARIANTS) -> list[str]:
+    """
+    Rewrites the user's instructions into a few more specific search
+    queries. A short generic instruction ("focus on research gaps")
+    embeds poorly against long, specific chunks -- retrieving separately
+    for a handful of more concrete rewordings ("limitations of current
+    methods", "authors' suggested future work") catches relevant chunks
+    the original phrasing alone would miss.
+
+    Always returns the ORIGINAL instructions as the first element, even
+    if the Groq call fails -- so a failure here degrades gracefully to
+    the old single-query behavior instead of breaking retrieval entirely.
+    """
+    queries = [instructions]
+    if not GROQ_API_KEY:
+        return queries  # can't expand without a key; fall back silently
+
+    system_prompt = (
+        f"You rewrite a research report instruction into {num_variants} alternative, "
+        "more specific search queries that would each surface different relevant "
+        "passages from a document. Keep each query short (under 15 words) and "
+        "focused on one concrete angle. Respond ONLY with JSON: "
+        '{"queries": ["...", "...", "..."]} with exactly '
+        f"{num_variants} entries, no extra text."
+    )
+    try:
+        raw = _call_groq(GROQ_FILTER_MODEL, system_prompt, instructions, json_mode=True)
+        parsed = json.loads(raw)
+        variants = [q.strip() for q in parsed.get("queries", []) if isinstance(q, str) and q.strip()]
+        queries.extend(variants[:num_variants])
+    except Exception:
+        # Any failure here (network, bad JSON, rate limit) -- just use the
+        # original instructions alone rather than failing the whole pipeline
+        # over a "nice to have" retrieval improvement.
+        pass
+    return queries
 
 
 def generate_report(chunks: list[dict], instructions: str) -> dict:

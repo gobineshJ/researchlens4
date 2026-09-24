@@ -21,7 +21,7 @@ import time
 from contextlib import contextmanager
 from urllib.parse import urlparse
 
-from .config import CHUNK_SIZE_TOKENS, CHUNK_OVERLAP_RATIO, CRAWL_MAX_DEPTH, CRAWL_SAME_DOMAIN_ONLY
+from .config import CHUNK_SIZE_TOKENS, CHUNK_OVERLAP_RATIO, CRAWL_MAX_DEPTH, CRAWL_SAME_DOMAIN_ONLY, RERANK_SCORE_WARNING_THRESHOLD
 
 
 class EvaluationReport:
@@ -159,9 +159,31 @@ RETRIEVAL_DISTANCE_WARNING_THRESHOLD = 1.0  # cosine distance (0=identical, 1=un
 # past the "unrelated" midpoint of the 0-2 cosine range).
 
 def validate_retrieval_confidence(retrieved_chunks: list[dict], report: EvaluationReport):
+    """
+    Prefers "rerank_score" when present (the cross-encoder's direct
+    relevance judgment -- more accurate than embedding distance). Falls
+    back to "distance" for chunks that went through reranker's fallback
+    path (reranker model unavailable), so this check still means
+    something even when reranking itself degraded.
+    """
     stage = "retrieval"
     if not retrieved_chunks:
         report.add_check(stage, "confidence", False, "No chunks retrieved -- nothing to generate from.")
+        return
+
+    has_rerank_scores = all("rerank_score" in c for c in retrieved_chunks)
+
+    if has_rerank_scores:
+        scores = [c["rerank_score"] for c in retrieved_chunks]
+        avg_score = sum(scores) / len(scores)
+        weak_matches = [s for s in scores if s < RERANK_SCORE_WARNING_THRESHOLD]
+        report.add_check(
+            stage, "confidence", len(weak_matches) == 0,
+            f"Average rerank score {avg_score:.3f}; {len(weak_matches)} of {len(scores)} "
+            f"chunk(s) scored below the relevance threshold ({RERANK_SCORE_WARNING_THRESHOLD}) -- "
+            f"the source material may not actually cover the given instructions well." if weak_matches
+            else f"Average rerank score {avg_score:.3f} -- all chunks scored as relevant.",
+        )
         return
 
     distances = [c["distance"] for c in retrieved_chunks if "distance" in c]
@@ -174,7 +196,8 @@ def validate_retrieval_confidence(retrieved_chunks: list[dict], report: Evaluati
         f"Average retrieval distance {avg_distance:.3f}; {len(weak_matches)} of {len(distances)} "
         f"chunk(s) exceeded the {RETRIEVAL_DISTANCE_WARNING_THRESHOLD} weak-match threshold -- "
         f"the source material may not actually cover the given instructions well." if weak_matches
-        else f"Average retrieval distance {avg_distance:.3f} -- all chunks within confidence threshold.",
+        else f"Average retrieval distance {avg_distance:.3f} -- all chunks within confidence threshold "
+             f"(fallback distance-based check -- reranker was unavailable for this run).",
     )
 
 

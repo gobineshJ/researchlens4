@@ -36,6 +36,28 @@ TOP_K_CHUNKS_PER_SOURCE = 5   # used per document when there are multiple --
                               # representation instead of one global top-k
                               # that can silently drop an entire document
 
+# --- Query expansion ---
+# A short generic instruction ("focus on research gaps") embeds poorly
+# against long specific chunks -- rewriting it into a few more specific
+# search queries first and retrieving for each catches relevant chunks
+# the original phrasing alone would miss.
+QUERY_EXPANSION_VARIANTS = 3   # extra rewordings generated per request (plus the original)
+
+# --- Reranking ---
+# Vector search is retrieved cheaply in bulk (oversampled), then a
+# cross-encoder re-scores that pool for actual relevance to the query --
+# catches cases where embedding similarity and true relevance diverge,
+# which plain vector distance alone can miss.
+CANDIDATE_OVERSAMPLE_FACTOR = 3     # retrieve this many times TOP_K before reranking down
+RERANKER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+# ms-marco cross-encoders conventionally treat 0 as the relevant/irrelevant
+# boundary (positive = relevant, negative = not) -- this is a standard
+# heuristic for this model family, not a value empirically calibrated
+# against this project's own corpus (same caveat as the retrieval
+# distance threshold below: worth checking against a deliberately
+# irrelevant test case before trusting it fully).
+RERANK_SCORE_WARNING_THRESHOLD = 0.0
+
 # --- ChromaDB ---
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_store")
 CHROMA_COLLECTION_NAME = "researchlens"
