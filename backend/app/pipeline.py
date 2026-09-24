@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 
 from . import doc_parser, scraper, groq_client, chunker, vectorstore, pdf_export, evaluation
-from .config import TOP_K_CHUNKS
+from .config import TOP_K_CHUNKS, TOP_K_CHUNKS_PER_SOURCE
 
 
 def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str) -> dict:
@@ -59,10 +59,21 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
         collection, session_id = vectorstore.new_session_collection()
         vectorstore.add_chunks(collection, chunks)
 
-    # --- Stage 7: retrieve top-k for the report query (the instructions themselves) ---
+    # --- Stage 7: retrieve for the report query (the instructions themselves) ---
+    # With more than one source document, retrieve separately PER document
+    # rather than one global top-k -- otherwise chunks from a document that
+    # simply ranks lower for this query can be dropped entirely, even
+    # though the user explicitly asked to cover every uploaded document.
     with report.timed_stage("retrieval"):
-        retrieved = vectorstore.retrieve_top_k(collection, instructions, k=TOP_K_CHUNKS)
+        source_names = sorted({c["source_name"] for c in chunks})
+        if len(source_names) > 1:
+            retrieved = vectorstore.retrieve_top_k_per_source(
+                collection, instructions, source_names, k_per_source=TOP_K_CHUNKS_PER_SOURCE
+            )
+        else:
+            retrieved = vectorstore.retrieve_top_k(collection, instructions, k=TOP_K_CHUNKS)
     evaluation.validate_retrieval_confidence(retrieved, report)
+    evaluation.validate_source_coverage(source_names, retrieved, report)
 
     # --- Stage 8: Groq report generation ---
     generation_result = {"report_text": "", "citations_used": []}

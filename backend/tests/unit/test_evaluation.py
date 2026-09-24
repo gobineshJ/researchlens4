@@ -166,3 +166,41 @@ def test_pdf_encoding_safety_fails_if_sanitization_is_skipped():
     raw = "disease\u2010specific diagnosis"  # smart hyphen, never sanitized
     evaluation.validate_pdf_encoding_safety(raw, [], report)
     assert not report.checks[0]["passed"]
+
+
+# ---------- Source coverage (the 3-PDF bug) ----------
+
+def test_source_coverage_fails_when_a_document_is_dropped():
+    """
+    Reproduces the exact reported bug: 3 uploaded documents, retrieval
+    only returned chunks from 2 of them.
+    """
+    report = evaluation.EvaluationReport()
+    all_sources = ["pdf1.pdf", "pdf2.pdf", "pdf3.pdf"]
+    retrieved = [
+        {"source_name": "pdf1.pdf", "source_label": "pdf1.pdf, page 1", "text": "t", "distance": 0.3},
+        {"source_name": "pdf2.pdf", "source_label": "pdf2.pdf, page 1", "text": "t", "distance": 0.3},
+    ]
+    evaluation.validate_source_coverage(all_sources, retrieved, report)
+    assert not report.checks[0]["passed"]
+    assert "pdf3.pdf" in report.checks[0]["detail"]
+
+
+def test_source_coverage_passes_when_every_document_represented():
+    report = evaluation.EvaluationReport()
+    all_sources = ["pdf1.pdf", "pdf2.pdf", "pdf3.pdf"]
+    retrieved = [
+        {"source_name": name, "source_label": f"{name}, page 1", "text": "t", "distance": 0.3}
+        for name in all_sources
+    ]
+    evaluation.validate_source_coverage(all_sources, retrieved, report)
+    assert report.checks[0]["passed"]
+
+
+def test_source_coverage_skipped_for_single_document():
+    """With only one uploaded document, coverage is trivially satisfied
+    by the existing single-source retrieval path -- no check should even
+    fire, since there's nothing to compare against."""
+    report = evaluation.EvaluationReport()
+    evaluation.validate_source_coverage(["only.pdf"], [{"source_name": "only.pdf"}], report)
+    assert report.checks == []

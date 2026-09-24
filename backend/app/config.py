@@ -30,7 +30,11 @@ CHUNK_SIZE_TOKENS = 650
 CHUNK_OVERLAP_RATIO = 0.15
 
 # --- Retrieval ---
-TOP_K_CHUNKS = 5
+TOP_K_CHUNKS = 5              # used when there's exactly one source document
+TOP_K_CHUNKS_PER_SOURCE = 5   # used per document when there are multiple --
+                              # guarantees every uploaded file/page gets
+                              # representation instead of one global top-k
+                              # that can silently drop an entire document
 
 # --- ChromaDB ---
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_store")

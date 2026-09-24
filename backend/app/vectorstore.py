@@ -50,7 +50,7 @@ def new_session_collection(session_id: str | None = None):
 
 def add_chunks(collection, chunks: list[dict]) -> None:
     """
-    chunks: [{"text": ..., "source_label": ..., "source_type": ...}, ...]
+    chunks: [{"text": ..., "source_label": ..., "source_type": ..., "source_name": ...}, ...]
     Embeds each chunk's text and stores it with its metadata.
     """
     if not chunks:
@@ -61,7 +61,7 @@ def add_chunks(collection, chunks: list[dict]) -> None:
     embeddings = embedder.encode(texts).tolist()
     ids = [str(uuid.uuid4()) for _ in chunks]
     metadatas = [
-        {"source_label": c["source_label"], "source_type": c["source_type"]}
+        {"source_label": c["source_label"], "source_type": c["source_type"], "source_name": c["source_name"]}
         for c in chunks
     ]
 
@@ -75,7 +75,12 @@ def add_chunks(collection, chunks: list[dict]) -> None:
 
 def retrieve_top_k(collection, query: str, k: int) -> list[dict]:
     """
-    Returns the k most relevant chunks to `query`:
+    Returns the k most relevant chunks to `query` across the WHOLE
+    collection, regardless of which document they came from. With more
+    than one uploaded document, this can starve out a document whose
+    content simply doesn't rank in the global top-k -- see
+    retrieve_top_k_per_source for the fix used by the pipeline when
+    multiple documents are present.
         [{"text": ..., "source_label": ..., "source_type": ..., "distance": ...}, ...]
     """
     embedder = _get_embedder()
@@ -85,7 +90,32 @@ def retrieve_top_k(collection, query: str, k: int) -> list[dict]:
         query_embeddings=query_embedding,
         n_results=k,
     )
+    return _parse_query_results(results)
 
+
+def retrieve_top_k_per_source(collection, query: str, source_names: list[str], k_per_source: int) -> list[dict]:
+    """
+    Retrieves the top k_per_source chunks SEPARATELY for each name in
+    source_names, then combines them -- guaranteeing every document gets
+    representation instead of only the globally closest matches across
+    all documents combined. With a single source, this returns the same
+    result as retrieve_top_k(collection, query, k_per_source).
+    """
+    embedder = _get_embedder()
+    query_embedding = embedder.encode([query]).tolist()
+
+    all_hits = []
+    for name in source_names:
+        results = collection.query(
+            query_embeddings=query_embedding,
+            n_results=k_per_source,
+            where={"source_name": name},
+        )
+        all_hits.extend(_parse_query_results(results))
+    return all_hits
+
+
+def _parse_query_results(results: dict) -> list[dict]:
     hits = []
     documents = results.get("documents", [[]])[0]
     metadatas = results.get("metadatas", [[]])[0]
@@ -96,6 +126,7 @@ def retrieve_top_k(collection, query: str, k: int) -> list[dict]:
             "text": text,
             "source_label": meta["source_label"],
             "source_type": meta["source_type"],
+            "source_name": meta["source_name"],
             "distance": distance,
         })
     return hits

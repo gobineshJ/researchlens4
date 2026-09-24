@@ -178,6 +178,28 @@ def validate_retrieval_confidence(retrieved_chunks: list[dict], report: Evaluati
     )
 
 
+def validate_source_coverage(all_source_names: list[str], retrieved_chunks: list[dict],
+                              report: EvaluationReport):
+    """
+    Catches exactly the multi-PDF bug: a global top-k retrieval can
+    silently drop an entire uploaded document if none of its chunks rank
+    high enough, even though the user explicitly uploaded it to be
+    covered. Confirms every source that went in has at least one chunk
+    that came out.
+    """
+    stage = "retrieval"
+    if len(all_source_names) <= 1:
+        return  # nothing to compare against with a single source
+    retrieved_names = {c["source_name"] for c in retrieved_chunks}
+    missing = [name for name in all_source_names if name not in retrieved_names]
+    report.add_check(
+        stage, "source_coverage", len(missing) == 0,
+        f"{len(missing)} of {len(all_source_names)} uploaded source(s) got zero representation "
+        f"in retrieval: {missing}" if missing
+        else f"All {len(all_source_names)} uploaded sources are represented in retrieval.",
+    )
+
+
 def evaluate_retrieval(retrieved_labels: list[str], relevant_labels: set[str], k: int) -> dict:
     """
     Standard IR metrics. Call this from a test with known-relevant
