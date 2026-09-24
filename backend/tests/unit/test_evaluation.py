@@ -108,6 +108,35 @@ def test_retrieval_confidence_fails_on_empty_retrieval():
     assert not report.checks[0]["passed"]
 
 
+def test_retrieval_confidence_uses_rerank_score_when_present():
+    """When chunks carry rerank_score (the reranker actually ran), that
+    should be preferred over distance -- a high distance but positive
+    rerank_score should still PASS, since rerank_score is the more
+    accurate signal."""
+    report = evaluation.EvaluationReport()
+    chunks = [{"source_label": "x", "text": "t", "distance": 1.5, "rerank_score": 4.0}]
+    evaluation.validate_retrieval_confidence(chunks, report)
+    assert report.checks[0]["passed"]
+    assert "rerank score" in report.checks[0]["detail"]
+
+
+def test_retrieval_confidence_fails_on_negative_rerank_score():
+    report = evaluation.EvaluationReport()
+    chunks = [{"source_label": "x", "text": "t", "distance": 0.3, "rerank_score": -3.0}]
+    evaluation.validate_retrieval_confidence(chunks, report)
+    assert not report.checks[0]["passed"]
+
+
+def test_retrieval_confidence_falls_back_to_distance_when_reranker_degraded():
+    """Chunks from reranker's fallback path have no rerank_score at all --
+    should fall back to the distance-based check, not silently skip."""
+    report = evaluation.EvaluationReport()
+    chunks = [{"source_label": "x", "text": "t", "distance": 1.8}]  # no rerank_score key
+    evaluation.validate_retrieval_confidence(chunks, report)
+    assert not report.checks[0]["passed"]
+    assert "distance" in report.checks[0]["detail"]
+
+
 # ---------- Generation / groundedness ----------
 
 def test_groundedness_passes_when_report_matches_sources():
