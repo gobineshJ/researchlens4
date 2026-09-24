@@ -19,12 +19,24 @@ def _label_for(record: dict) -> str:
     return f"{record['title']}, {record['url']}"
 
 
+def _source_name_for(record: dict) -> str:
+    """
+    Identifies which DOCUMENT a chunk came from, as opposed to source_label
+    which identifies a specific page/section within it. Needed so retrieval
+    can guarantee every uploaded document gets representation, rather than
+    treating all chunks from all documents as one undifferentiated pool.
+    """
+    if record["source_type"] == "file":
+        return record["filename"]
+    return record["url"]
+
+
 def chunk_record(record: dict,
                   chunk_size: int = CHUNK_SIZE_TOKENS,
                   overlap_ratio: float = CHUNK_OVERLAP_RATIO) -> list[dict]:
     """
     Splits one record's text into word-bounded chunks. Returns a list of:
-        {"text": ..., "source_label": ..., "source_type": ...}
+        {"text": ..., "source_label": ..., "source_type": ..., "source_name": ...}
     """
     words = record["text"].split()
     if not words:
@@ -32,6 +44,7 @@ def chunk_record(record: dict,
 
     step = max(1, int(chunk_size * (1 - overlap_ratio)))
     label = _label_for(record)
+    source_name = _source_name_for(record)
 
     chunks = []
     start = 0
@@ -41,6 +54,7 @@ def chunk_record(record: dict,
             "text": " ".join(piece),
             "source_label": label,
             "source_type": record["source_type"],
+            "source_name": source_name,
         })
         if start + chunk_size >= len(words):
             break
