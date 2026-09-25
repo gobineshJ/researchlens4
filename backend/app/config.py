@@ -57,6 +57,15 @@ RERANKER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 # distance threshold below: worth checking against a deliberately
 # irrelevant test case before trusting it fully).
 RERANK_SCORE_WARNING_THRESHOLD = 0.0
+# ms-marco-MiniLM-L-6-v2 was trained on MS MARCO passages averaging
+# ~55-60 words. Our chunks are ~650 tokens -- roughly 10x longer than
+# what the model learned to score, which produces systematically
+# negative scores even for genuinely relevant chunks (confirmed: a
+# demonstrably well-grounded real run scored -5.970 average). Scoring
+# only a short leading snippet of each chunk, closer to the model's
+# trained input length, keeps scores in the regime the 0.0 threshold
+# actually means something in.
+RERANK_SNIPPET_CHARS = 400
 
 # --- ChromaDB ---
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_store")
@@ -67,3 +76,10 @@ EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 
 # --- Output ---
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./generated_reports")
+
+# --- Evaluation history ---
+# Every /process run appends its evaluation summary here as one JSON
+# line. This is what lets threshold recalibration be based on a real,
+# growing history instead of screenshots and memory -- see
+# evaluation.append_run_to_log().
+EVALUATION_LOG_PATH = os.getenv("EVALUATION_LOG_PATH", "./evaluation_log.jsonl")

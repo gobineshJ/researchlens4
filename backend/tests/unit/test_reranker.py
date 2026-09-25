@@ -54,6 +54,32 @@ def test_rerank_preserves_existing_fields(monkeypatch):
     assert result[0]["rerank_score"] == 1.0
 
 
+def test_rerank_scores_only_a_snippet_not_the_full_text(monkeypatch):
+    """
+    Verifies the length-mismatch fix: the model should be called with a
+    truncated snippet of long text, not the whole thing -- this is what
+    keeps scores in the regime ms-marco was actually trained on.
+    """
+    from app.config import RERANK_SNIPPET_CHARS
+    captured_pairs = []
+
+    class RecordingModel:
+        def predict(self, pairs):
+            captured_pairs.extend(pairs)
+            return [1.0] * len(pairs)
+
+    long_text = "word " * 1000  # far longer than RERANK_SNIPPET_CHARS
+    candidates = [{"text": long_text, "source_label": "a"}]
+    monkeypatch.setattr(reranker, "_get_reranker", lambda: RecordingModel())
+
+    result = reranker.rerank("query", candidates, top_k=1)
+
+    scored_text = captured_pairs[0][1]
+    assert len(scored_text) <= RERANK_SNIPPET_CHARS
+    # But the FULL text should still be what's returned for downstream use
+    assert result[0]["text"] == long_text
+
+
 def test_rerank_with_fallback_on_empty_candidates():
     assert reranker.rerank_with_fallback("query", [], top_k=5) == []
 

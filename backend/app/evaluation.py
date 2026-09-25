@@ -17,11 +17,18 @@ returned to the frontend alongside the actual results, so "did this
 work correctly" is a real answer, not an assumption.
 """
 
+import json
 import time
+import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urlparse
 
-from .config import CHUNK_SIZE_TOKENS, CHUNK_OVERLAP_RATIO, CRAWL_MAX_DEPTH, CRAWL_SAME_DOMAIN_ONLY, RERANK_SCORE_WARNING_THRESHOLD
+from .config import (
+    CHUNK_SIZE_TOKENS, CHUNK_OVERLAP_RATIO, CRAWL_MAX_DEPTH, CRAWL_SAME_DOMAIN_ONLY,
+    RERANK_SCORE_WARNING_THRESHOLD, EVALUATION_LOG_PATH,
+)
 
 
 class EvaluationReport:
@@ -323,3 +330,33 @@ def validate_pdf_encoding_safety(sanitized_report_text: str, sanitized_citations
         f"Sanitization missed character(s) {found} -- these will render as blank boxes in the output PDF.",
     )
 
+
+# ---------- Persistent evaluation history ----------
+# Every run's evaluation summary gets appended here as one JSON line.
+# This is what turns "before vs after" comparisons into something you
+# can actually query, rather than reconstructing them from screenshots
+# and memory (which is what every comparison so far in this project has
+# had to do). Never raises -- a logging failure should never break an
+# actual /process response.
+
+def append_run_to_log(report: "EvaluationReport", run_id: str | None = None,
+                       log_path: str = EVALUATION_LOG_PATH) -> None:
+    run_id = run_id or uuid.uuid4().hex[:12]
+    summary = report.to_dict()
+    entry = {
+        "run_id": run_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "summary": summary["summary"],
+        "error_count": summary["error_count"],
+        "stage_durations_seconds": summary["stage_durations_seconds"],
+        "checks": [
+            {"stage": c["stage"], "name": c["name"], "passed": c["passed"]}
+            for c in summary["checks"]
+        ],
+    }
+    try:
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass  # logging must never break the actual response
