@@ -13,7 +13,7 @@ reuse the cached instance.
 
 from sentence_transformers import CrossEncoder
 
-from .config import RERANKER_MODEL_NAME
+from .config import RERANKER_MODEL_NAME, RERANK_SNIPPET_CHARS
 
 _reranker = None
 
@@ -32,6 +32,13 @@ def rerank(query: str, candidates: list[dict], top_k: int) -> list[dict]:
     fields (text, source_label, source_name, distance, etc.) are kept
     unchanged -- this only adds a field and reorders/truncates the list.
 
+    Scoring uses only the first RERANK_SNIPPET_CHARS of each candidate's
+    text, not the full chunk -- ms-marco-MiniLM-L-6-v2 was trained on
+    short passages, and scoring full 650-token chunks pushes scores
+    systematically negative regardless of true relevance (see config.py).
+    The FULL text is still what gets returned and later sent to Groq --
+    only the score itself is based on the snippet.
+
     If candidates is empty, or top_k >= len(candidates), still runs the
     scoring (so rerank_score is always present on returned chunks) but
     obviously doesn't need to drop anything.
@@ -40,7 +47,7 @@ def rerank(query: str, candidates: list[dict], top_k: int) -> list[dict]:
         return []
 
     model = _get_reranker()
-    pairs = [(query, c["text"]) for c in candidates]
+    pairs = [(query, c["text"][:RERANK_SNIPPET_CHARS]) for c in candidates]
     scores = model.predict(pairs)
 
     scored = [
