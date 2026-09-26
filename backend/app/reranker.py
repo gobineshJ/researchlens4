@@ -25,40 +25,59 @@ def _get_reranker() -> CrossEncoder:
     return _reranker
 
 
-def rerank(query: str, candidates: list[dict], top_k: int) -> list[dict]:
+def rerank(queries: str | list[str], candidates: list[dict], top_k: int) -> list[dict]:
     """
-    Scores each candidate against `query` and returns the top_k, each
-    with a "rerank_score" field added (higher = more relevant). Existing
-    fields (text, source_label, source_name, distance, etc.) are kept
-    unchanged -- this only adds a field and reorders/truncates the list.
+    Scores each candidate against EVERY query in `queries` and keeps
+    each candidate's BEST (highest) score, then returns the top_k by
+    that score. Accepts a single string for backward compatibility.
 
+    Why multiple queries: a cross-encoder scores how well a passage
+    answers a SPECIFIC query -- a vague one-word instruction like
+    "summary" has no topic for the model to match against, so every
+    candidate scores deeply negative regardless of true relevance
+    (confirmed: -7.160 average on a demonstrably well-grounded real
+    run). groq_client.expand_query() already turns vague instructions
+    into several specific search-style queries -- passing ALL of them
+    here, and keeping each candidate's best match across all of them,
+    means a chunk only needs to be genuinely relevant to ONE reasonable
+    phrasing of what the user meant, not to their exact literal wording.
+
+    Adds "rerank_score" (the best score found) and "rerank_query" (which
+    query produced it, for debugging/transparency) to each candidate.
     Scoring uses only the first RERANK_SNIPPET_CHARS of each candidate's
-    text, not the full chunk -- ms-marco-MiniLM-L-6-v2 was trained on
-    short passages, and scoring full 650-token chunks pushes scores
-    systematically negative regardless of true relevance (see config.py).
-    The FULL text is still what gets returned and later sent to Groq --
-    only the score itself is based on the snippet.
-
-    If candidates is empty, or top_k >= len(candidates), still runs the
-    scoring (so rerank_score is always present on returned chunks) but
-    obviously doesn't need to drop anything.
+    text, not the full chunk -- keeps inputs closer to the short-passage
+    length ms-marco-MiniLM-L-6-v2 was actually trained on. The FULL text
+    is still what gets returned and later sent to Groq.
     """
     if not candidates:
         return []
+    if isinstance(queries, str):
+        queries = [queries]
 
     model = _get_reranker()
-    pairs = [(query, c["text"][:RERANK_SNIPPET_CHARS]) for c in candidates]
-    scores = model.predict(pairs)
+    snippets = [c["text"][:RERANK_SNIPPET_CHARS] for c in candidates]
+
+    # best_score[i] / best_query[i] track candidate i's best result so far
+    best_score = [float("-inf")] * len(candidates)
+    best_query = [None] * len(candidates)
+
+    for query in queries:
+        pairs = [(query, snippet) for snippet in snippets]
+        scores = model.predict(pairs)
+        for i, score in enumerate(scores):
+            if float(score) > best_score[i]:
+                best_score[i] = float(score)
+                best_query[i] = query
 
     scored = [
-        {**candidate, "rerank_score": float(score)}
-        for candidate, score in zip(candidates, scores)
+        {**candidate, "rerank_score": best_score[i], "rerank_query": best_query[i]}
+        for i, candidate in enumerate(candidates)
     ]
     scored.sort(key=lambda c: c["rerank_score"], reverse=True)
     return scored[:top_k]
 
 
-def rerank_with_fallback(query: str, candidates: list[dict], top_k: int) -> list[dict]:
+def rerank_with_fallback(queries: str | list[str], candidates: list[dict], top_k: int) -> list[dict]:
     """
     Same as rerank(), but never lets a reranker failure (model can't
     download, out of memory, etc.) break the whole pipeline. Falls back
@@ -71,7 +90,7 @@ def rerank_with_fallback(query: str, candidates: list[dict], top_k: int) -> list
     if not candidates:
         return []
     try:
-        return rerank(query, candidates, top_k)
+        return rerank(queries, candidates, top_k)
     except Exception:
         ranked_by_distance = sorted(candidates, key=lambda c: c.get("distance", float("inf")))
         return ranked_by_distance[:top_k]

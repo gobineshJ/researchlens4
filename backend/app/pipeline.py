@@ -69,10 +69,14 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
     #      in step 3 can't silently squeeze an entire document out the
     #      way one global top-k used to.
     #   3. Reranking -- a cross-encoder re-scores each source's candidate
-    #      pool against the ORIGINAL instructions (expansion was only for
-    #      building a diverse pool, not for scoring) and keeps the best
-    #      few per source. Falls back to distance-sorted results if the
-    #      reranker model can't load.
+    #      pool against ALL of the expanded queries (not just the raw
+    #      instructions) and keeps each candidate's BEST score across
+    #      them. A vague instruction like "summary" gives the
+    #      cross-encoder nothing specific to match against on its own;
+    #      scoring against every expanded variant means a chunk only
+    #      needs to genuinely answer ONE reasonable phrasing of what was
+    #      asked. Falls back to distance-sorted results if the reranker
+    #      model can't load.
     with report.timed_stage("retrieval"):
         source_names = sorted({c["source_name"] for c in chunks})
         expanded_queries = groq_client.expand_query(instructions)
@@ -86,12 +90,12 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
                 candidates = vectorstore.retrieve_candidates(
                     collection, expanded_queries, k_per_query=oversample_k, source_name=name
                 )
-                retrieved.extend(reranker.rerank_with_fallback(instructions, candidates, top_k=final_k))
+                retrieved.extend(reranker.rerank_with_fallback(expanded_queries, candidates, top_k=final_k))
         else:
             candidates = vectorstore.retrieve_candidates(
                 collection, expanded_queries, k_per_query=oversample_k
             )
-            retrieved = reranker.rerank_with_fallback(instructions, candidates, top_k=final_k)
+            retrieved = reranker.rerank_with_fallback(expanded_queries, candidates, top_k=final_k)
     evaluation.validate_retrieval_confidence(retrieved, report)
     evaluation.validate_source_coverage(source_names, retrieved, report)
 
