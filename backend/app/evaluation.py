@@ -37,8 +37,14 @@ class EvaluationReport:
         self.stage_durations: dict[str, float] = {}
         self.errors: list[str] = []
 
-    def add_check(self, stage: str, name: str, passed: bool, detail: str):
-        self.checks.append({"stage": stage, "name": name, "passed": passed, "detail": detail})
+    def add_check(self, stage: str, name: str, passed: bool, detail: str, value: float | None = None):
+        """
+        `value` is the actual number the check was judged against (e.g.
+        average rerank score, groundedness percentage) when there is one --
+        stored separately from `detail` so runs can be compared numerically
+        instead of by re-parsing sentences.
+        """
+        self.checks.append({"stage": stage, "name": name, "passed": passed, "detail": detail, "value": value})
 
     def record_error(self, stage: str, message: str):
         self.errors.append(f"[{stage}] {message}")
@@ -190,6 +196,7 @@ def validate_retrieval_confidence(retrieved_chunks: list[dict], report: Evaluati
             f"chunk(s) scored below the relevance threshold ({RERANK_SCORE_WARNING_THRESHOLD}) -- "
             f"the source material may not actually cover the given instructions well." if weak_matches
             else f"Average rerank score {avg_score:.3f} -- all chunks scored as relevant.",
+            value=round(avg_score, 3),
         )
         return
 
@@ -205,6 +212,7 @@ def validate_retrieval_confidence(retrieved_chunks: list[dict], report: Evaluati
         f"the source material may not actually cover the given instructions well." if weak_matches
         else f"Average retrieval distance {avg_distance:.3f} -- all chunks within confidence threshold "
              f"(fallback distance-based check -- reranker was unavailable for this run).",
+        value=round(avg_distance, 3),
     )
 
 
@@ -303,6 +311,7 @@ def validate_generation(report_text: str, citations_used: list[str], retrieved_c
             stage, "groundedness", grounded,
             f"{overlap:.0%} of the report's significant vocabulary appears in its cited sources "
             f"(threshold 30%)." + ("" if grounded else " Low overlap suggests possible drift from source content."),
+            value=round(overlap * 100, 1),
         )
 
 
@@ -340,17 +349,18 @@ def validate_pdf_encoding_safety(sanitized_report_text: str, sanitized_citations
 # actual /process response.
 
 def append_run_to_log(report: "EvaluationReport", run_id: str | None = None,
-                       log_path: str = EVALUATION_LOG_PATH) -> None:
+                       instructions: str = "", log_path: str = EVALUATION_LOG_PATH) -> None:
     run_id = run_id or uuid.uuid4().hex[:12]
     summary = report.to_dict()
     entry = {
         "run_id": run_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "instructions": instructions,
         "summary": summary["summary"],
         "error_count": summary["error_count"],
         "stage_durations_seconds": summary["stage_durations_seconds"],
         "checks": [
-            {"stage": c["stage"], "name": c["name"], "passed": c["passed"]}
+            {"stage": c["stage"], "name": c["name"], "passed": c["passed"], "value": c.get("value")}
             for c in summary["checks"]
         ],
     }
@@ -360,3 +370,47 @@ def append_run_to_log(report: "EvaluationReport", run_id: str | None = None,
             f.write(json.dumps(entry) + "\n")
     except Exception:
         pass  # logging must never break the actual response
+
+
+def read_run_history(log_path: str = EVALUATION_LOG_PATH, limit: int = 20) -> list[dict]:
+    """Returns the most recent `limit` logged runs, newest first."""
+    path = Path(log_path)
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").strip().splitlines()
+    except Exception:
+        return []
+    entries = []
+    for line in lines:
+        try:
+            entries.append(json.loads(line))
+        except Exception:
+            continue  # skip a corrupted line rather than failing the whole read
+    entries.reverse()
+    return entries[:limit]
+
+
+def read_run_history(log_path: str = EVALUATION_LOG_PATH, limit: int = 50) -> list[dict]:
+    """
+    Reads the evaluation log back out, newest first, for comparison
+    across runs. Returns [] if the log doesn't exist yet (first run
+    hasn't happened) rather than raising -- an empty history is a
+    normal, expected state, not an error.
+    """
+    path = Path(log_path)
+    if not path.exists():
+        return []
+
+    entries = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue  # skip a corrupted line rather than failing the whole read
+    entries.reverse()  # newest first
+    return entries[:limit]

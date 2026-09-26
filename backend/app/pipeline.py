@@ -124,7 +124,7 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
                 report,
             )
 
-    evaluation.append_run_to_log(report)
+    evaluation.append_run_to_log(report, instructions=instructions)
 
     return {
         "extracted_records": len(all_records),

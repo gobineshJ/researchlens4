@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse
 
 from .pipeline import run_pipeline
 from .groq_client import GroqNotConfigured
+from . import evaluation
 
 app = FastAPI(title="ResearchLens API")
 
@@ -75,3 +76,13 @@ def download(filename: str):
     if not path.exists():
         raise HTTPException(status_code=404, detail="Report not found.")
     return FileResponse(str(path), media_type="application/pdf", filename=filename)
+
+
+@app.get("/evaluation-history")
+def evaluation_history(limit: int = 50):
+    """
+    Every /process run is logged automatically (see pipeline.py's call
+    to evaluation.append_run_to_log). This just reads that log back out
+    for the frontend's comparison view -- newest first.
+    """
+    return {"runs": evaluation.read_run_history(limit=limit)}

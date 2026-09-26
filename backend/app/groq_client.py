@@ -31,7 +31,8 @@ class GroqNotConfigured(Exception):
     pass
 
 
-def _call_groq(model: str, system_prompt: str, user_prompt: str, json_mode: bool = True) -> str:
+def _call_groq(model: str, system_prompt: str, user_prompt: str, json_mode: bool = True,
+                temperature: float = 0.2) -> str:
     if not GROQ_API_KEY:
         raise GroqNotConfigured(
             "GROQ_API_KEY is not set. Get a free key at console.groq.com/keys "
@@ -44,7 +45,7 @@ def _call_groq(model: str, system_prompt: str, user_prompt: str, json_mode: bool
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": 0.2,
+        "temperature": temperature,
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
@@ -106,7 +107,10 @@ def filter_relevant_pages(candidates: list[dict], topic: str, instructions: str)
     )
     user_prompt = f"Topic/instructions: {topic}\n{instructions}\n\nCandidates:\n{listing}"
 
-    raw = _call_groq(GROQ_FILTER_MODEL, system_prompt, user_prompt, json_mode=True)
+    # temperature=0 -- this is a mechanical filtering DECISION (relevant
+    # or not), not creative writing. Sampling here would make which pages
+    # get scraped vary between identical runs for no good reason.
+    raw = _call_groq(GROQ_FILTER_MODEL, system_prompt, user_prompt, json_mode=True, temperature=0)
     parsed = json.loads(raw)
     decisions = {d["index"]: d for d in parsed.get("decisions", [])}
 
@@ -147,7 +151,13 @@ def expand_query(instructions: str, num_variants: int = QUERY_EXPANSION_VARIANTS
         f"{num_variants} entries, no extra text."
     )
     try:
-        raw = _call_groq(GROQ_FILTER_MODEL, system_prompt, instructions, json_mode=True)
+        # temperature=0 -- query expansion feeds retrieval directly, so it
+        # needs to be deterministic. Sampling here (as it was before) meant
+        # identical instructions on identical documents could produce
+        # different rerank scores run to run, purely from wording drift in
+        # the expanded queries -- confirmed as the cause of exactly that
+        # symptom on a real "summary" test.
+        raw = _call_groq(GROQ_FILTER_MODEL, system_prompt, instructions, json_mode=True, temperature=0)
         parsed = json.loads(raw)
         variants = [q.strip() for q in parsed.get("queries", []) if isinstance(q, str) and q.strip()]
         queries.extend(variants[:num_variants])

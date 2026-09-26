@@ -47,3 +47,38 @@ def test_expand_query_handles_malformed_json_gracefully(monkeypatch):
 
     result = groq_client.expand_query("focus on research gaps")
     assert result == ["focus on research gaps"]
+
+
+def test_expand_query_calls_groq_with_zero_temperature(monkeypatch):
+    """
+    The actual determinism fix: query expansion feeds retrieval directly,
+    so sampling here (the old default temperature=0.2) meant identical
+    instructions could produce different expanded queries -- and
+    therefore different retrieval/rerank results -- run to run.
+    """
+    monkeypatch.setattr(groq_client, "GROQ_API_KEY", "fake_key_for_test")
+    captured_kwargs = {}
+
+    def capturing_call(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return '{"queries": ["a", "b", "c"]}'
+    monkeypatch.setattr(groq_client, "_call_groq", capturing_call)
+
+    groq_client.expand_query("focus on research gaps")
+    assert captured_kwargs.get("temperature") == 0
+
+
+def test_filter_relevant_pages_calls_groq_with_zero_temperature(monkeypatch):
+    monkeypatch.setattr(groq_client, "GROQ_API_KEY", "fake_key_for_test")
+    captured_kwargs = {}
+
+    def capturing_call(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return '{"decisions": []}'
+    monkeypatch.setattr(groq_client, "_call_groq", capturing_call)
+
+    groq_client.filter_relevant_pages(
+        [{"url": "https://x.com", "title": "T", "snippet": "S", "depth": 0}],
+        topic="test", instructions="test",
+    )
+    assert captured_kwargs.get("temperature") == 0
