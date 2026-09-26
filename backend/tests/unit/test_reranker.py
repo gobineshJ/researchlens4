@@ -18,6 +18,46 @@ class _FakeModel:
         return [self.score_map.get(text, 0.0) for _, text in pairs]
 
 
+def test_rerank_with_multiple_queries_keeps_each_candidates_best_score(monkeypatch):
+    """
+    The actual fix for the "summary" bug: a vague single query gives a
+    candidate a poor score, but if ANY of several expanded queries
+    scores it well, that best score should win -- not whichever query
+    happened to be scored last, and not just the first one.
+    """
+    candidates = [
+        {"text": "discusses federated learning across hospital sites", "source_label": "a"},
+        {"text": "covers dataset licensing terms", "source_label": "b"},
+    ]
+
+    class QueryAwareModel:
+        def predict(self, pairs):
+            scores = []
+            for query, text in pairs:
+                if query == "vague" :
+                    scores.append(-8.0)  # vague query: everything scores badly
+                elif query == "federated learning" and "federated" in text:
+                    scores.append(9.0)   # specific query matches candidate a well
+                else:
+                    scores.append(-3.0)
+            return scores
+
+    monkeypatch.setattr(reranker, "_get_reranker", lambda: QueryAwareModel())
+
+    result = reranker.rerank(["vague", "federated learning"], candidates, top_k=2)
+
+    top = next(r for r in result if r["source_label"] == "a")
+    assert top["rerank_score"] == 9.0  # best across queries, not the vague one
+    assert top["rerank_query"] == "federated learning"
+
+
+def test_rerank_accepts_single_string_for_backward_compatibility(monkeypatch):
+    fake = _FakeModel({"x": 2.0})
+    monkeypatch.setattr(reranker, "_get_reranker", lambda: fake)
+    result = reranker.rerank("a single query string", [{"text": "x", "source_label": "a"}], top_k=1)
+    assert result[0]["rerank_score"] == 2.0
+
+
 def test_rerank_orders_by_score_descending(monkeypatch):
     candidates = [
         {"text": "low relevance chunk", "source_label": "a"},
