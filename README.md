@@ -20,7 +20,7 @@ USER
   ├── Seed URLs ─────────────────────► CRAWLER (Requests + BeautifulSoup) ──► Candidate pages
   └── Instructions ───────────────────────────────────────────────────────┐
                                                                             │
-                                              Candidate pages ──► GROQ RELEVANCE FILTER (llama-3.1-8b-instant)
+                                              Candidate pages ──► GROQ RELEVANCE FILTER (openai/gpt-oss-20b)
                                                                             │
                                                         selected pages ──► full scrape
                                                                             │
@@ -28,22 +28,35 @@ USER
                                                                             │
                                           CHUNKS ──► EMBEDDING (sentence-transformers, all-MiniLM-L6-v2)
                                                                             │
-                                                               ──► CHROMADB (vectors + metadata)
+                                                               ──► CHROMADB (vectors + metadata, cosine distance)
                                                                             │
-                                       User query/instructions ──► QUERY EMBEDDING ──► ChromaDB retrieval
+                                     Instructions ──► GROQ QUERY EXPANSION (a few more specific rewordings)
                                                                             │
-                                                              TOP-K CHUNKS (k=5) + source metadata
+                                     Expanded queries ──► PER-SOURCE oversampled ChromaDB retrieval
+                                                          (every uploaded document/page gets its own pool --
+                                                           prevents one document being silently dropped)
                                                                             │
-                                                    GROQ REPORT GENERATION (llama-3.3-70b-versatile)
+                                               Candidate pool ──► CROSS-ENCODER RERANKING
+                                                                    (cross-encoder/ms-marco-MiniLM-L-6-v2,
+                                                                     scores a short snippet of each candidate
+                                                                     against every expanded query, keeps each
+                                                                     candidate's best score, per source)
+                                                                            │
+                                                              FINAL CHUNKS + source metadata
+                                                                            │
+                                                    GROQ REPORT GENERATION (openai/gpt-oss-120b)
                                                                             │
                                                       Grounded report + citations ──► REPORTLAB ──► PDF
                                                                             │
                                                                      REACT UI ──► Download
+                                                                            │
+                                                     Every run's evaluation ──► evaluation_log.jsonl
+                                                     (viewable in the UI's "Run history" panel)
 ```
 
 ## Project status
 
-Backend and frontend are both built. Every module has been tested individually (extraction, chunking, crawl-discovery logic, PDF export, evaluation checks, FastAPI routing). The one piece not yet confirmed end-to-end is the embedding step (`sentence-transformers` downloading its model from Hugging Face) — this needs normal internet access to run, which the environment this was built in didn't have. **Run the smoke test below first** to confirm it on your machine before relying on the full pipeline.
+Backend and frontend are both built, including query expansion, per-document coverage-preserving retrieval, cross-encoder reranking, and persistent run history. Every module has unit tests (70 as of this writing), including the FastAPI routes directly via `TestClient`. What's been verified with real network access (confirmed working by direct testing): the embedding model, the cross-encoder reranker, and Groq calls. What's still worth doing before fully trusting this on a new machine: `RERANK_SCORE_WARNING_THRESHOLD` (in `config.py`) has only ever been calibrated against *good* matches from real runs — it's never been tested against a genuinely irrelevant document/instruction pairing, which `tests/integration/test_pipeline_scenarios.py`'s `test_scenario_1_deliberately_mismatched_topic` exists specifically to do. **Run the smoke test below first** to confirm the environment works before relying on the full pipeline.
 
 ## File structure
 
@@ -51,26 +64,34 @@ Backend and frontend are both built. Every module has been tested individually (
 researchlens/
 ├── .gitignore
 ├── README.md
+├── .github/workflows/backend-tests.yml   # runs unit tests on every push
 ├── backend/
 │   ├── requirements.txt
+│   ├── requirements-dev.txt   # adds pytest, pytest-cov
+│   ├── pytest.ini
 │   ├── .env.example
+│   ├── evaluation_log.jsonl   # created on first run; gitignored, per-machine history
 │   ├── app/
-│   │   ├── main.py            # FastAPI app + endpoints
+│   │   ├── main.py            # FastAPI app + endpoints (including /evaluation-history)
 │   │   ├── config.py          # all tunable settings, env vars
 │   │   ├── doc_parser.py      # PDF/DOCX/TXT -> text + metadata
 │   │   ├── scraper.py         # crawl discovery + full-page scrape
-│   │   ├── groq_client.py     # relevance filter + report generation
-│   │   ├── chunker.py         # token-bounded chunking with overlap
-│   │   ├── vectorstore.py     # ChromaDB + embeddings
-│   │   ├── pdf_export.py      # ReportLab PDF generation
-│   │   ├── evaluation.py      # validation checks per pipeline stage
+│   │   ├── groq_client.py     # relevance filter + query expansion + report generation
+│   │   ├── chunker.py         # token-bounded chunking with overlap, tags each chunk's source_name
+│   │   ├── vectorstore.py     # ChromaDB + embeddings, per-source oversampled retrieval
+│   │   ├── reranker.py        # cross-encoder reranking, multi-query, graceful fallback
+│   │   ├── pdf_export.py      # ReportLab PDF generation + Unicode sanitization
+│   │   ├── evaluation.py      # validation checks per stage + persistent run logging
 │   │   └── pipeline.py        # orchestrates all stages in order
 │   └── tests/
+│       ├── conftest.py        # shared fixtures (sample PDF/DOCX/TXT generation)
+│       ├── unit/               # no network needed, runs in seconds
+│       └── integration/        # needs GROQ_API_KEY + (for 2 tests) internet
 └── frontend/
     ├── package.json
     ├── index.html
     └── src/
-        ├── App.jsx             # entire UI: form, results, evaluation table
+        ├── App.jsx             # form, results, evaluation table, run history panel
         └── main.jsx
 ```
 
@@ -125,16 +146,21 @@ Before trusting the full pipeline, confirm each layer works on your machine, in 
 
 ## Evaluation / validation
 
-Each pipeline stage has a real check, not just a "looks fine" assumption:
+Each pipeline stage has a real check, not just a "looks fine" assumption. Every check's numeric value (not just pass/fail) is stored, so results are comparable across runs, not just per-run:
 
 | Stage | What's checked |
 |---|---|
 | Extraction | Every record has non-empty text and required metadata (filename+location, or url+title) |
-| Chunking | Chunk sizes stay within the configured token limit; overlap is actually applied |
+| Chunking | Chunk sizes stay within the configured token limit; overlap is actually applied between consecutive chunks (checked on real produced output, not just the config) |
 | Crawler | Depth limit respected, all URLs on the seed domain, zero duplicates |
-| Retrieval | Precision@K, Recall@K, MRR — computed via `evaluate_retrieval()` against a labeled test set (not run automatically on a live query, since there's no ground truth for an arbitrary user question) |
-| Generation | Citation markers present in the report, every cited source was actually retrieved (citation accuracy), report cites at least one source (groundedness) |
-| System | Processing time per stage, error count — both surfaced in the evaluation panel |
+| Retrieval — confidence | Prefers the cross-encoder's rerank score when reranking succeeded (falls back to embedding distance if the reranker was unavailable) — average score/distance is stored as a numeric value for comparison across runs |
+| Retrieval — source coverage | With multiple uploaded documents, confirms every one of them actually contributed at least one retrieved chunk — catches a document being silently dropped |
+| Retrieval — Precision@K/Recall@K/MRR | Computed via `evaluate_retrieval()` against a labeled test set (not run automatically on a live query, since there's no ground truth for an arbitrary user question) |
+| Generation | Citation markers present, every cited source was actually retrieved (citation accuracy), and groundedness — the percentage of the report's significant vocabulary that actually appears in its cited sources (not just "cited something") |
+| PDF export | The text actually written to the PDF (after sanitization) contains no characters common fonts can't render — checked against the real rendered output, not the raw source text |
+| System | Processing time per stage, error count |
+
+**Run history**: every `/process` call appends its evaluation summary (with numeric values, not just pass/fail) to `backend/evaluation_log.jsonl`, viewable via the "Run history" panel in the UI or the `/evaluation-history` endpoint directly. This is what makes before/after comparisons (e.g. after changing a threshold or retrieval strategy) an actual query instead of screenshots.
 
 ## Testing
 
@@ -153,17 +179,29 @@ pytest tests/integration/ -v   # needs GROQ_API_KEY in .env
 RUN_NETWORK_URL_TESTS=1 pytest tests/integration/ -v   # also hits live URLs
 ```
 
+**Coverage** is measured automatically on every `pytest` run (configured in `pytest.ini` / `.coveragerc`) and prints a per-file breakdown. Baseline from unit tests alone: **61.8% overall** — `chunker.py` and `config.py` at 100%, but `pipeline.py` at just 7.9% and `vectorstore.py` at 20.4%, since their real logic only runs against live ChromaDB/embeddings/Groq calls, which the integration tests exercise (not counted in that 61.8% baseline). Run `pytest tests/unit/ tests/integration/` together with a real `GROQ_API_KEY` to see the fuller picture.
+
 **Automation:** `.github/workflows/backend-tests.yml` runs the unit tests automatically on every push and pull request via GitHub Actions — no setup needed once this repo is on GitHub, since unit tests need no secrets. The integration tests are deliberately left out of that workflow because they need a real Groq key; if you want those automated too, add `GROQ_API_KEY` as a repository secret (Settings → Secrets and variables → Actions) and extend the workflow to pass it through and run `pytest tests/integration/`.
 
 ## Roadmap
 
-This was built in one focused session rather than day-by-day, but functionally covers what the three-day brief asked for:
+This started as a one-day build and has since grown well past the original three-day brief's scope:
 
 * File parsing + crawl discovery — **Done**
 * Groq relevance filter + full scraping of selected pages — **Done**
-* Chunking + embeddings + ChromaDB storage/retrieval — **Done** (retrieval untested end-to-end due to sandbox network limits — see Project status)
+* Chunking + embeddings + ChromaDB storage/retrieval — **Done**, verified with real network access
+* Query expansion (Groq rewrites vague instructions into more specific search queries) — **Done**
+* Per-document retrieval with guaranteed coverage (no document silently dropped when multiple are uploaded) — **Done**
+* Cross-encoder reranking, scored on short snippets to match the model's trained input length, multi-query aware — **Done**, verified with real network access
 * Groq report generation + citation-aware PDF export — **Done**
+* Persistent evaluation history + in-app run comparison — **Done**
 * React frontend wired to all of the above — **Done**
+* Automated test suite (unit + integration) with CI on every push — **Done**
+
+**Still open, honestly:**
+* `RERANK_SCORE_WARNING_THRESHOLD` has only ever been calibrated against good matches — never against a confirmed-bad one. `test_scenario_1_deliberately_mismatched_topic` in `tests/integration/` exists specifically to close this gap; run it.
+* Retrieval Precision@K/Recall@K/MRR (`evaluate_retrieval()`) exists but has no real labeled test set behind it yet.
+* Groundedness is vocabulary overlap, not true entailment — a report could reuse a source's words while misstating their meaning and still pass.
 
 ## Support
 

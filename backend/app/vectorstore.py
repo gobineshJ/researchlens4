@@ -73,47 +73,6 @@ def add_chunks(collection, chunks: list[dict]) -> None:
     )
 
 
-def retrieve_top_k(collection, query: str, k: int) -> list[dict]:
-    """
-    Returns the k most relevant chunks to `query` across the WHOLE
-    collection, regardless of which document they came from. With more
-    than one uploaded document, this can starve out a document whose
-    content simply doesn't rank in the global top-k -- see
-    retrieve_top_k_per_source for the fix used by the pipeline when
-    multiple documents are present.
-        [{"text": ..., "source_label": ..., "source_type": ..., "distance": ...}, ...]
-    """
-    embedder = _get_embedder()
-    query_embedding = embedder.encode([query]).tolist()
-
-    results = collection.query(
-        query_embeddings=query_embedding,
-        n_results=k,
-    )
-    return _parse_query_results(results)
-
-
-def retrieve_top_k_per_source(collection, query: str, source_names: list[str], k_per_source: int) -> list[dict]:
-    """
-    Retrieves the top k_per_source chunks SEPARATELY for each name in
-    source_names, then combines them -- guaranteeing every document gets
-    representation instead of only the globally closest matches across
-    all documents combined. With a single source, this returns the same
-    result as retrieve_top_k(collection, query, k_per_source).
-    """
-    embedder = _get_embedder()
-    query_embedding = embedder.encode([query]).tolist()
-
-    all_hits = []
-    for name in source_names:
-        results = collection.query(
-            query_embeddings=query_embedding,
-            n_results=k_per_source,
-            where={"source_name": name},
-        )
-        all_hits.extend(_parse_query_results(results))
-    return all_hits
-
 
 def retrieve_candidates(collection, queries: list[str], k_per_query: int,
                          source_name: str | None = None) -> list[dict]:
@@ -125,9 +84,10 @@ def retrieve_candidates(collection, queries: list[str], k_per_query: int,
     oversampled candidate pool, then hand that pool to reranker.rerank()
     to pick the best k for that source.
 
-    With a single query (the original instructions, no expansion), this
-    behaves like retrieve_top_k / retrieve_top_k_per_source but returns
-    more candidates than needed so reranking has something to work with.
+    With a single query (the original instructions, no expansion) and
+    source_name set, this is equivalent to a simple per-document top-k
+    lookup, just returning more candidates than needed so reranking has
+    something to work with.
     """
     embedder = _get_embedder()
     where = {"source_name": source_name} if source_name else None
