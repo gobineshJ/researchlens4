@@ -9,8 +9,11 @@ separate afterthought.
 import uuid
 from pathlib import Path
 
-from . import doc_parser, scraper, groq_client, chunker, vectorstore, pdf_export, evaluation, reranker
-from .config import TOP_K_CHUNKS, TOP_K_CHUNKS_PER_SOURCE, CANDIDATE_OVERSAMPLE_FACTOR
+from . import doc_parser, scraper, groq_client, chunker, vectorstore, pdf_export, evaluation, reranker, hybrid_search
+from .config import (
+    TOP_K_CHUNKS, TOP_K_CHUNKS_PER_SOURCE, CANDIDATE_OVERSAMPLE_FACTOR,
+    ANALYSIS_TOP_K_MULTIPLIER, RRF_K,
+)
 
 
 def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str) -> dict:
@@ -60,44 +63,86 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
         vectorstore.add_chunks(collection, chunks)
 
     # --- Stage 7: retrieve for the report query ---
-    # Three things happen here, in order:
-    #   1. Query expansion -- the raw instructions get rewritten into a
-    #      few more specific search queries (falls back to just the
-    #      original instructions if Groq is unavailable).
-    #   2. Oversampled retrieval PER SOURCE DOCUMENT -- guarantees every
-    #      uploaded file/page gets its own candidate pool, so reranking
-    #      in step 3 can't silently squeeze an entire document out the
-    #      way one global top-k used to.
-    #   3. Reranking -- a cross-encoder re-scores each source's candidate
-    #      pool against ALL of the expanded queries (not just the raw
-    #      instructions) and keeps each candidate's BEST score across
-    #      them. A vague instruction like "summary" gives the
-    #      cross-encoder nothing specific to match against on its own;
-    #      scoring against every expanded variant means a chunk only
-    #      needs to genuinely answer ONE reasonable phrasing of what was
-    #      asked. Falls back to distance-sorted results if the reranker
-    #      model can't load.
+    # An intent router decides HOW to retrieve, because different
+    # instructions need fundamentally different strategies, not just
+    # different prompts:
+    #
+    #   "summary" -- the user wants the whole document covered. There is
+    #       no specific topic to search FOR, so similarity/keyword
+    #       search is the wrong tool entirely: it would just surface
+    #       whatever happens to embed closest to the word "summarize".
+    #       Instead, chunks are sampled evenly by POSITION across each
+    #       source document (chunker.sample_representative), then
+    #       reranked against the expanded queries only to pick the best
+    #       ordering/labeling among the positional sample -- not to
+    #       filter it down by relevance.
+    #
+    #   "targeted_qa" / "analysis" -- a real topic exists to search for.
+    #       For each source document and each expanded query variant,
+    #       both dense vector search AND BM25 keyword search run
+    #       independently, then their two RANKINGS (not raw scores,
+    #       which live on incomparable scales) are combined with
+    #       Reciprocal Rank Fusion. This catches both exact-term matches
+    #       (a specific dataset/method name BM25 catches but embeddings
+    #       might not rank highly) and semantic matches (paraphrases
+    #       BM25 would miss entirely). The best-scoring fused candidates
+    #       per source are then reranked by the cross-encoder, same as
+    #       before. "analysis" gets a wider final_k than "targeted_qa" --
+    #       synthesizing a theme genuinely needs more supporting evidence
+    #       than answering one narrow question.
     with report.timed_stage("retrieval"):
         source_names = sorted({c["source_name"] for c in chunks})
+        chunks_by_source: dict[str, list[dict]] = {}
+        for c in chunks:
+            chunks_by_source.setdefault(c["source_name"], []).append(c)
+
+        intent = groq_client.classify_intent(instructions)
+        report.add_check(
+            "retrieval", "intent", True,
+            f"Classified as '{intent}' -- "
+            + {
+                "summary": "sampling chunks spread across each document's full span, not by similarity.",
+                "targeted_qa": "hybrid vector + BM25 retrieval (RRF-fused), then reranked.",
+                "analysis": "hybrid vector + BM25 retrieval (RRF-fused, wider net), then reranked.",
+            }[intent],
+        )
+
         expanded_queries = groq_client.expand_query(instructions)
         multi_source = len(source_names) > 1
-        final_k = TOP_K_CHUNKS_PER_SOURCE if multi_source else TOP_K_CHUNKS
+        base_k = TOP_K_CHUNKS_PER_SOURCE if multi_source else TOP_K_CHUNKS
+        final_k = round(base_k * ANALYSIS_TOP_K_MULTIPLIER) if intent == "analysis" else base_k
         oversample_k = final_k * CANDIDATE_OVERSAMPLE_FACTOR
 
         retrieved: list[dict] = []
-        if multi_source:
-            for name in source_names:
-                candidates = vectorstore.retrieve_candidates(
-                    collection, expanded_queries, k_per_query=oversample_k, source_name=name
+        for name in source_names:
+            source_chunks = chunks_by_source[name]
+
+            if intent == "summary":
+                sample = chunker.sample_representative(source_chunks, final_k)
+                retrieved.extend(reranker.rerank_with_fallback(expanded_queries, sample, top_k=final_k))
+                continue
+
+            bm25_index, bm25_chunks = hybrid_search.build_index(source_chunks)
+
+            fused_by_text: dict[str, dict] = {}
+            for query in expanded_queries:
+                vector_ranked = vectorstore.retrieve_candidates(
+                    collection, [query], k_per_query=oversample_k, source_name=name
                 )
-                retrieved.extend(reranker.rerank_with_fallback(expanded_queries, candidates, top_k=final_k))
-        else:
-            candidates = vectorstore.retrieve_candidates(
-                collection, expanded_queries, k_per_query=oversample_k
-            )
-            retrieved = reranker.rerank_with_fallback(expanded_queries, candidates, top_k=final_k)
+                bm25_ranked = hybrid_search.search(bm25_index, bm25_chunks, query, top_k=oversample_k)
+                fused = hybrid_search.fuse_rrf(vector_ranked, bm25_ranked, k_rrf=RRF_K)
+                for chunk in fused:
+                    text = chunk["text"]
+                    if text not in fused_by_text or chunk["rrf_score"] > fused_by_text[text]["rrf_score"]:
+                        fused_by_text[text] = chunk
+
+            candidates = sorted(fused_by_text.values(), key=lambda c: c["rrf_score"], reverse=True)[:oversample_k]
+            retrieved.extend(reranker.rerank_with_fallback(expanded_queries, candidates, top_k=final_k))
+
     evaluation.validate_retrieval_confidence(retrieved, report)
     evaluation.validate_source_coverage(source_names, retrieved, report)
+    if intent == "summary":
+        evaluation.validate_span_coverage(chunks_by_source, retrieved, report)
 
     # --- Stage 8: Groq report generation ---
     generation_result = {"report_text": "", "citations_used": []}

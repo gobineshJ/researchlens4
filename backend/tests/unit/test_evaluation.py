@@ -95,11 +95,19 @@ def test_retrieval_confidence_passes_on_close_match():
     assert report.checks[0]["passed"]
 
 
-def test_retrieval_confidence_fails_on_distant_match():
+def test_retrieval_confidence_is_informational_on_distant_match():
+    """
+    validate_retrieval_confidence is diagnostic-only (see its docstring
+    for why): across real runs, absolute score/distance magnitude didn't
+    reliably predict actual output quality, so it no longer gates the
+    report. It should still report the real average distance, but always
+    pass -- groundedness is the actual quality gate now.
+    """
     report = evaluation.EvaluationReport()
     chunks = [{"source_label": "x", "text": "t", "distance": 1.8}]  # near "opposite" end of 0-2 range
     evaluation.validate_retrieval_confidence(chunks, report)
-    assert not report.checks[0]["passed"]
+    assert report.checks[0]["passed"]
+    assert report.checks[0]["value"] == 1.8
 
 
 def test_retrieval_confidence_fails_on_empty_retrieval():
@@ -120,21 +128,83 @@ def test_retrieval_confidence_uses_rerank_score_when_present():
     assert "rerank score" in report.checks[0]["detail"]
 
 
-def test_retrieval_confidence_fails_on_negative_rerank_score():
+def test_retrieval_confidence_is_informational_on_negative_rerank_score():
+    """A negative rerank score is still reported (via detail/value), but
+    no longer fails the check -- see the informational-only test above."""
     report = evaluation.EvaluationReport()
     chunks = [{"source_label": "x", "text": "t", "distance": 0.3, "rerank_score": -3.0}]
     evaluation.validate_retrieval_confidence(chunks, report)
-    assert not report.checks[0]["passed"]
+    assert report.checks[0]["passed"]
+    assert report.checks[0]["value"] == -3.0
 
 
 def test_retrieval_confidence_falls_back_to_distance_when_reranker_degraded():
     """Chunks from reranker's fallback path have no rerank_score at all --
-    should fall back to the distance-based check, not silently skip."""
+    should fall back to the distance-based check (still informational-
+    only), not silently skip."""
     report = evaluation.EvaluationReport()
     chunks = [{"source_label": "x", "text": "t", "distance": 1.8}]  # no rerank_score key
     evaluation.validate_retrieval_confidence(chunks, report)
-    assert not report.checks[0]["passed"]
+    assert report.checks[0]["passed"]
     assert "distance" in report.checks[0]["detail"]
+
+
+# ---------- Span coverage (positional sampling for "summary" intent) ----------
+
+def _source_chunks(n: int, name: str = "doc.pdf") -> list[dict]:
+    return [{"text": f"chunk-{i}", "source_name": name} for i in range(n)]
+
+
+def test_span_coverage_passes_when_selection_spans_wide_range():
+    report = evaluation.EvaluationReport()
+    source_chunks = _source_chunks(100)
+    # picks positions 0, 25, 50, 75, 99 -- spans the full range
+    retrieved = [source_chunks[i] for i in (0, 25, 50, 75, 99)]
+    evaluation.validate_span_coverage({"doc.pdf": source_chunks}, retrieved, report)
+    assert report.checks[0]["passed"]
+
+
+def test_span_coverage_fails_when_selection_clusters_near_start():
+    report = evaluation.EvaluationReport()
+    source_chunks = _source_chunks(100)
+    # all picks bunched in the first 10% of the document
+    retrieved = [source_chunks[i] for i in (0, 2, 4, 6, 8)]
+    evaluation.validate_span_coverage({"doc.pdf": source_chunks}, retrieved, report)
+    assert not report.checks[0]["passed"]
+
+
+def test_span_coverage_passes_for_small_documents_regardless_of_spread():
+    """When a document has few chunks, selecting nearly all of them
+    trivially satisfies "representative", even if the numeric span
+    fraction alone would look narrow."""
+    report = evaluation.EvaluationReport()
+    source_chunks = _source_chunks(3)
+    retrieved = [source_chunks[0], source_chunks[1]]
+    evaluation.validate_span_coverage({"doc.pdf": source_chunks}, retrieved, report)
+    assert report.checks[0]["passed"]
+
+
+def test_span_coverage_skips_documents_with_one_chunk():
+    report = evaluation.EvaluationReport()
+    source_chunks = _source_chunks(1)
+    evaluation.validate_span_coverage({"doc.pdf": source_chunks}, source_chunks, report)
+    assert report.checks == []
+
+
+def test_span_coverage_checks_each_source_independently():
+    report = evaluation.EvaluationReport()
+    wide = _source_chunks(100, name="wide.pdf")
+    narrow = _source_chunks(100, name="narrow.pdf")
+    retrieved = (
+        [wide[i] for i in (0, 25, 50, 75, 99)]      # spans fully
+        + [narrow[i] for i in (0, 1, 2, 3, 4)]      # clustered near start
+    )
+    evaluation.validate_span_coverage(
+        {"wide.pdf": wide, "narrow.pdf": narrow}, retrieved, report
+    )
+    results = {c["detail"].split(":")[0]: c["passed"] for c in report.checks}
+    assert results["wide.pdf"]
+    assert not results["narrow.pdf"]
 
 
 # ---------- Generation / groundedness ----------

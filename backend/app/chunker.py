@@ -69,3 +69,35 @@ def chunk_all(records: list[dict]) -> list[dict]:
     for record in records:
         all_chunks.extend(chunk_record(record))
     return all_chunks
+
+
+def sample_representative(chunks: list[dict], k: int) -> list[dict]:
+    """
+    Picks k chunks EVENLY SPACED across the list, by position -- not by
+    similarity to any query. This is for "summary"-intent requests: a
+    generic instruction like "summarize this document" has no specific
+    topic for similarity search to match against, so the top-5-most-
+    similar chunks would just reflect whatever happens to embed closest
+    to the word "summarize" -- not a representative sample of the whole
+    document, which is what the user actually wants covered.
+
+    `chunks` is assumed to already be in the document's original reading
+    order (chunker.chunk_record produces chunks that way).
+
+    Returns all of `chunks` unchanged if there are k or fewer of them --
+    nothing to sample down.
+    """
+    if len(chunks) <= k:
+        return list(chunks)
+    if k <= 0:
+        return []
+
+    step = len(chunks) / k
+    indices = sorted({int(i * step) for i in range(k)})
+    if len(indices) < k:
+        # Rounding collisions (two computed positions landed on the same
+        # index) can leave us short of k -- top up with the next unused
+        # indices so the caller reliably gets k chunks back.
+        remaining = [i for i in range(len(chunks)) if i not in indices]
+        indices = sorted(indices + remaining[: k - len(indices)])
+    return [chunks[i] for i in indices]

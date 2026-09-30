@@ -169,6 +169,59 @@ def expand_query(instructions: str, num_variants: int = QUERY_EXPANSION_VARIANTS
     return queries
 
 
+def classify_intent(instructions: str) -> str:
+    """
+    Classifies `instructions` into one of three retrieval strategies:
+      "summary"      -- asks for coverage of the WHOLE document, no
+                         specific sub-topic named (e.g. "summarize this").
+      "targeted_qa"  -- asks a specific, narrow question with one
+                         findable answer.
+      "analysis"     -- asks for discussion, comparison, or synthesis of
+                         a real topic/theme -- broader than one fact, but
+                         not asking to cover the whole document.
+
+    This exists because a vague "summarize" instruction and a narrow
+    factual question need fundamentally different retrieval strategies,
+    not just different prompts: "summarize" isn't asking for the 5
+    chunks most SIMILAR to the word "summarize" (which is meaningless),
+    it's asking for chunks spread across the document's full span. A
+    narrow question, by contrast, genuinely benefits from similarity-
+    and keyword-based retrieval honing in on one place in the text.
+
+    Returns "targeted_qa" on any failure or when Groq isn't configured --
+    the safest default, since it's the strategy the pipeline already used
+    before intent routing existed.
+    """
+    if not GROQ_API_KEY:
+        return "targeted_qa"
+
+    system_prompt = (
+        "Classify the following research report instruction into exactly "
+        "one of three categories.\n"
+        '"summary": asks for an overview or summary of the ENTIRE '
+        "document, with no specific sub-topic named (e.g. \"summarize "
+        "this paper\", \"give me an overview\").\n"
+        '"targeted_qa": asks a specific, narrow question with one '
+        "findable answer (e.g. \"what dataset did they use?\").\n"
+        '"analysis": asks for discussion, comparison, or synthesis of a '
+        "real topic or theme -- broader than one fact, but not asking to "
+        "cover the whole document (e.g. \"discuss the limitations\", "
+        "\"compare the two approaches\").\n"
+        'Respond ONLY with JSON: {"intent": "summary"} or '
+        '{"intent": "targeted_qa"} or {"intent": "analysis"}, no extra text.'
+    )
+    try:
+        # temperature=0 -- this decides which retrieval code path runs,
+        # so it needs to be deterministic like the other routing/filtering
+        # decisions in this module.
+        raw = _call_groq(GROQ_FILTER_MODEL, system_prompt, instructions, json_mode=True, temperature=0)
+        parsed = json.loads(raw)
+        intent = parsed.get("intent", "targeted_qa")
+        return intent if intent in ("summary", "targeted_qa", "analysis") else "targeted_qa"
+    except Exception:
+        return "targeted_qa"
+
+
 def generate_report(chunks: list[dict], instructions: str) -> dict:
     """
     chunks: list of {"text": ..., "source_label": ..., "source_type": ...}

@@ -160,24 +160,29 @@ def validate_crawler(candidates: list[dict], seed_url: str, report: EvaluationRe
 # quality signal that needs no ground truth at all.
 
 RETRIEVAL_DISTANCE_WARNING_THRESHOLD = 1.0  # cosine distance (0=identical, 1=unrelated, 2=opposite)
-# Raised from 0.8 -> 1.0 after real evidence: a confirmed well-grounded,
-# accurately-cited run (see conversation log) produced an average distance
-# of 0.856, which the 0.8 threshold flagged as a false failure. Short
-# instruction-style queries ("focus on X") compared against long paragraph
-# chunks structurally produce higher distances than same-length text pairs
-# would, even for genuinely relevant matches -- this is a property of how
-# sentence embedding models handle length asymmetry, not a sign of a bad
-# match. 1.0 leaves headroom above the observed good-match value while
-# still catching genuinely unrelated retrievals (distance approaching or
-# past the "unrelated" midpoint of the 0-2 cosine range).
 
 def validate_retrieval_confidence(retrieved_chunks: list[dict], report: EvaluationReport):
     """
-    Prefers "rerank_score" when present (the cross-encoder's direct
-    relevance judgment -- more accurate than embedding distance). Falls
-    back to "distance" for chunks that went through reranker's fallback
-    path (reranker model unavailable), so this check still means
-    something even when reranking itself degraded.
+    Diagnostic only -- reports the average rerank score (or distance,
+    when the reranker's fallback path was used) but ALWAYS passes.
+
+    This used to be a pass/fail gate on a threshold. It was demoted after
+    three real, independently-verified runs on the same document, varying
+    only the instruction wording, showed it tracked the WRONG direction:
+    it failed the run with the best actual groundedness (52%) and passed
+    a weaker one (42%). A short, near-verbatim-heading query can score
+    the cross-encoder very highly while still producing a shallow, poorly
+    grounded report -- and a genuinely well-grounded run on a harder,
+    more natural-language question can score the cross-encoder poorly.
+    Absolute cross-encoder score magnitude doesn't reliably predict real
+    output quality here, so gating on it produced false alarms and false
+    confidence in roughly equal measure.
+
+    Real quality gating now lives in validate_generation's groundedness
+    check (vocabulary overlap between the report and its cited sources),
+    which has tracked actual quality correctly in every real comparison
+    run so far. This check is kept because the number itself is still
+    useful context when reading a report -- just not as a pass/fail gate.
     """
     stage = "retrieval"
     if not retrieved_chunks:
@@ -191,10 +196,10 @@ def validate_retrieval_confidence(retrieved_chunks: list[dict], report: Evaluati
         avg_score = sum(scores) / len(scores)
         weak_matches = [s for s in scores if s < RERANK_SCORE_WARNING_THRESHOLD]
         report.add_check(
-            stage, "confidence", len(weak_matches) == 0,
+            stage, "confidence", True,
             f"Average rerank score {avg_score:.3f}; {len(weak_matches)} of {len(scores)} "
-            f"chunk(s) scored below the relevance threshold ({RERANK_SCORE_WARNING_THRESHOLD}) -- "
-            f"the source material may not actually cover the given instructions well." if weak_matches
+            f"chunk(s) scored below {RERANK_SCORE_WARNING_THRESHOLD} (informational only -- "
+            f"see groundedness for the actual quality gate)." if weak_matches
             else f"Average rerank score {avg_score:.3f} -- all chunks scored as relevant.",
             value=round(avg_score, 3),
         )
@@ -206,14 +211,55 @@ def validate_retrieval_confidence(retrieved_chunks: list[dict], report: Evaluati
     avg_distance = sum(distances) / len(distances)
     weak_matches = [d for d in distances if d > RETRIEVAL_DISTANCE_WARNING_THRESHOLD]
     report.add_check(
-        stage, "confidence", len(weak_matches) == 0,
+        stage, "confidence", True,
         f"Average retrieval distance {avg_distance:.3f}; {len(weak_matches)} of {len(distances)} "
-        f"chunk(s) exceeded the {RETRIEVAL_DISTANCE_WARNING_THRESHOLD} weak-match threshold -- "
-        f"the source material may not actually cover the given instructions well." if weak_matches
+        f"chunk(s) exceeded {RETRIEVAL_DISTANCE_WARNING_THRESHOLD} (fallback distance-based check -- "
+        f"reranker was unavailable for this run; informational only -- see groundedness for the "
+        f"actual quality gate)." if weak_matches
         else f"Average retrieval distance {avg_distance:.3f} -- all chunks within confidence threshold "
              f"(fallback distance-based check -- reranker was unavailable for this run).",
         value=round(avg_distance, 3),
     )
+
+
+def validate_span_coverage(chunks_by_source: dict[str, list[dict]], retrieved_chunks: list[dict],
+                            report: EvaluationReport):
+    """
+    Only meaningful for "summary" intent, where selection is supposed to
+    be POSITIONAL (chunker.sample_representative), not similarity-based.
+    Confirms the selected chunks actually span a wide range of each
+    document's position, rather than clustering near the start (or
+    anywhere else) -- which would defeat the point of positional
+    sampling and silently degrade back into a narrow, unrepresentative
+    summary.
+
+    `chunks_by_source` must be each source's chunks in their ORIGINAL
+    reading order (the same order sample_representative was given), so
+    position lookups are meaningful.
+    """
+    stage = "retrieval"
+    for name, source_chunks in chunks_by_source.items():
+        if len(source_chunks) <= 1:
+            continue  # nothing to spread across
+
+        text_to_position = {c["text"]: i for i, c in enumerate(source_chunks)}
+        positions = [
+            text_to_position[c["text"]] for c in retrieved_chunks
+            if c.get("source_name") == name and c["text"] in text_to_position
+        ]
+        if not positions:
+            continue
+
+        full_span = len(source_chunks) - 1
+        span_fraction = (max(positions) - min(positions)) / full_span
+        covers_everything_available = len(positions) >= len(source_chunks) - 1
+        passed = span_fraction >= 0.5 or covers_everything_available
+        report.add_check(
+            stage, "span_coverage", passed,
+            f"{name}: selected chunks span {span_fraction:.0%} of the document's position "
+            f"range (positions {min(positions)}-{max(positions)} of 0-{full_span}).",
+            value=round(span_fraction, 3),
+        )
 
 
 def validate_source_coverage(all_source_names: list[str], retrieved_chunks: list[dict],
@@ -370,25 +416,6 @@ def append_run_to_log(report: "EvaluationReport", run_id: str | None = None,
             f.write(json.dumps(entry) + "\n")
     except Exception:
         pass  # logging must never break the actual response
-
-
-def read_run_history(log_path: str = EVALUATION_LOG_PATH, limit: int = 20) -> list[dict]:
-    """Returns the most recent `limit` logged runs, newest first."""
-    path = Path(log_path)
-    if not path.exists():
-        return []
-    try:
-        lines = path.read_text(encoding="utf-8").strip().splitlines()
-    except Exception:
-        return []
-    entries = []
-    for line in lines:
-        try:
-            entries.append(json.loads(line))
-        except Exception:
-            continue  # skip a corrupted line rather than failing the whole read
-    entries.reverse()
-    return entries[:limit]
 
 
 def read_run_history(log_path: str = EVALUATION_LOG_PATH, limit: int = 50) -> list[dict]:

@@ -9,4 +9,5 @@ pymupdf
 python-docx
 sentence-transformers
 chromadb
+rank-bm25
 reportlab

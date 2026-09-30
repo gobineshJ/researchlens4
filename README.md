@@ -30,11 +30,25 @@ USER
                                                                             │
                                                                ──► CHROMADB (vectors + metadata, cosine distance)
                                                                             │
-                                     Instructions ──► GROQ QUERY EXPANSION (a few more specific rewordings)
+                                     Instructions ──► GROQ INTENT ROUTER (openai/gpt-oss-20b)
+                                                        classifies: summary / targeted_qa / analysis
                                                                             │
-                                     Expanded queries ──► PER-SOURCE oversampled ChromaDB retrieval
-                                                          (every uploaded document/page gets its own pool --
-                                                           prevents one document being silently dropped)
+                              ┌─────────────────────────────────────────────┴─────────────────────────────────┐
+                              │ intent = "summary"                                    intent = "targeted_qa" / "analysis"
+                              ▼                                                                    ▼
+                  Instructions ──► GROQ QUERY EXPANSION                        Instructions ──► GROQ QUERY EXPANSION
+                                    (a few more specific rewordings)                             (a few more specific rewordings)
+                              │                                                                    │
+                  PER-SOURCE positional sampling                                   PER-SOURCE, per expanded query:
+                  (chunker.sample_representative --                                 ├─ DENSE vector search (ChromaDB)
+                   picks chunks evenly spaced across                                └─ BM25 keyword search (rank-bm25)
+                   each document's full span, NOT by                                              │
+                   similarity -- "summarize" has no                                RECIPROCAL RANK FUSION (RRF)
+                   topic for similarity search to match)                            combines both rankings by position,
+                              │                                                      not raw score (incomparable scales) --
+                              │                                                      "analysis" widens the final pool via
+                              │                                                      ANALYSIS_TOP_K_MULTIPLIER
+                              └─────────────────────────────────────────────┬─────────────────────────────────┘
                                                                             │
                                                Candidate pool ──► CROSS-ENCODER RERANKING
                                                                     (cross-encoder/ms-marco-MiniLM-L-6-v2,
@@ -56,7 +70,9 @@ USER
 
 ## Project status
 
-Backend and frontend are both built, including query expansion, per-document coverage-preserving retrieval, cross-encoder reranking, and persistent run history. Every module has unit tests (70 as of this writing), including the FastAPI routes directly via `TestClient`. What's been verified with real network access (confirmed working by direct testing): the embedding model, the cross-encoder reranker, and Groq calls. What's still worth doing before fully trusting this on a new machine: `RERANK_SCORE_WARNING_THRESHOLD` (in `config.py`) has only ever been calibrated against *good* matches from real runs — it's never been tested against a genuinely irrelevant document/instruction pairing, which `tests/integration/test_pipeline_scenarios.py`'s `test_scenario_1_deliberately_mismatched_topic` exists specifically to do. **Run the smoke test below first** to confirm the environment works before relying on the full pipeline.
+Backend and frontend are both built, including an intent router, hybrid (BM25 + vector) retrieval fused with Reciprocal Rank Fusion, section-aware summarization, cross-encoder reranking, and persistent run history. Every module has unit tests (94 as of this writing), including the FastAPI routes directly via `TestClient`. What's been verified with real network access (confirmed working by direct testing): the embedding model, the cross-encoder reranker, and Groq calls. The intent router, hybrid retrieval, and RRF fusion are new and unit-tested with mocked/synthetic data, but have not yet been run against a live document end-to-end with a real Groq key — that's the next thing to confirm on a machine with network access.
+
+What's still worth doing before fully trusting this on a new machine: `RERANK_SCORE_WARNING_THRESHOLD`-based retrieval confidence (in `config.py`/`evaluation.py`) is now **informational only** — across three real comparison runs it tracked the wrong direction relative to actual report quality (it failed the best run and passed a weaker one), so it no longer gates the report. `validate_generation`'s groundedness check (vocabulary overlap between the report and its cited sources) is the real quality gate now, and was correct in all three of those comparisons. `tests/integration/test_pipeline_scenarios.py`'s `test_scenario_1_deliberately_mismatched_topic` exists specifically to exercise this with a real document. **Run the smoke test below first** to confirm the environment works before relying on the full pipeline.
 
 ## File structure
 
@@ -76,9 +92,10 @@ researchlens/
 │   │   ├── config.py          # all tunable settings, env vars
 │   │   ├── doc_parser.py      # PDF/DOCX/TXT -> text + metadata
 │   │   ├── scraper.py         # crawl discovery + full-page scrape
-│   │   ├── groq_client.py     # relevance filter + query expansion + report generation
-│   │   ├── chunker.py         # token-bounded chunking with overlap, tags each chunk's source_name
+│   │   ├── groq_client.py     # relevance filter + intent classification + query expansion + report generation
+│   │   ├── chunker.py         # token-bounded chunking with overlap; also positional sampling for "summary" intent
 │   │   ├── vectorstore.py     # ChromaDB + embeddings, per-source oversampled retrieval
+│   │   ├── hybrid_search.py   # BM25 keyword search + Reciprocal Rank Fusion (RRF) with vector search
 │   │   ├── reranker.py        # cross-encoder reranking, multi-query, graceful fallback
 │   │   ├── pdf_export.py      # ReportLab PDF generation + Unicode sanitization
 │   │   ├── evaluation.py      # validation checks per stage + persistent run logging
@@ -153,10 +170,12 @@ Each pipeline stage has a real check, not just a "looks fine" assumption. Every 
 | Extraction | Every record has non-empty text and required metadata (filename+location, or url+title) |
 | Chunking | Chunk sizes stay within the configured token limit; overlap is actually applied between consecutive chunks (checked on real produced output, not just the config) |
 | Crawler | Depth limit respected, all URLs on the seed domain, zero duplicates |
-| Retrieval — confidence | Prefers the cross-encoder's rerank score when reranking succeeded (falls back to embedding distance if the reranker was unavailable) — average score/distance is stored as a numeric value for comparison across runs |
+| Retrieval — intent | Which of `summary` / `targeted_qa` / `analysis` the instructions were classified as, and which retrieval strategy that triggered — always "passes"; this is a transparency record, not a gate |
+| Retrieval — confidence | **Informational only.** Reports the average cross-encoder rerank score (or embedding distance, if the reranker's fallback path ran) as a numeric value, but never fails the report — see Project status above for why |
 | Retrieval — source coverage | With multiple uploaded documents, confirms every one of them actually contributed at least one retrieved chunk — catches a document being silently dropped |
+| Retrieval — span coverage | **Only for `summary` intent.** Confirms the positionally-sampled chunks actually spread across at least half of each document's position range (or cover nearly everything, for a short document) — catches positional sampling silently degrading into a narrow cluster |
 | Retrieval — Precision@K/Recall@K/MRR | Computed via `evaluate_retrieval()` against a labeled test set (not run automatically on a live query, since there's no ground truth for an arbitrary user question) |
-| Generation | Citation markers present, every cited source was actually retrieved (citation accuracy), and groundedness — the percentage of the report's significant vocabulary that actually appears in its cited sources (not just "cited something") |
+| Generation | Citation markers present, every cited source was actually retrieved (citation accuracy), and **groundedness** — the percentage of the report's significant vocabulary that actually appears in its cited sources (not just "cited something"). This is the real pass/fail quality gate for retrieval+generation as a whole. |
 | PDF export | The text actually written to the PDF (after sanitization) contains no characters common fonts can't render — checked against the real rendered output, not the raw source text |
 | System | Processing time per stage, error count |
 
@@ -166,7 +185,7 @@ Each pipeline stage has a real check, not just a "looks fine" assumption. Every 
 
 Two kinds of tests, in `backend/tests/`:
 
-- **`tests/unit/`** — no network, no Groq key, runs in under a second. Tests document parsing, chunking (including real overlap between consecutive chunks, not just config), scraper HTML logic, and every evaluation check with both a passing and a genuinely failing case.
+- **`tests/unit/`** — no network, no Groq key, runs in under a second. Tests document parsing, chunking (including real overlap between consecutive chunks and positional sampling for "summary" intent, not just config), BM25 search and RRF fusion (`hybrid_search.py`) with synthetic corpora, intent classification's fallback behavior, scraper HTML logic, and every evaluation check with both a passing and a genuinely failing case.
 - **`tests/integration/`** — runs the real pipeline against real Groq calls and embeddings. Needs `GROQ_API_KEY` set in `.env`; skips automatically (not an error) if it's missing. Implements deliberate scenario tests: a topic mismatch that should fail retrieval/groundedness on purpose, an image-only PDF that should fail extraction cleanly instead of crashing, and a tiny input smaller than the top-k retrieval count. Two further scenarios (an irrelevant seed URL, a web-only run with no file) hit live URLs and only run if you set `RUN_NETWORK_URL_TESTS=1`, since they're slower and depend on an external page staying up.
 
 Run everything:
@@ -179,7 +198,7 @@ pytest tests/integration/ -v   # needs GROQ_API_KEY in .env
 RUN_NETWORK_URL_TESTS=1 pytest tests/integration/ -v   # also hits live URLs
 ```
 
-**Coverage** is measured automatically on every `pytest` run (configured in `pytest.ini` / `.coveragerc`) and prints a per-file breakdown. Baseline from unit tests alone: **61.8% overall** — `chunker.py` and `config.py` at 100%, but `pipeline.py` at just 7.9% and `vectorstore.py` at 20.4%, since their real logic only runs against live ChromaDB/embeddings/Groq calls, which the integration tests exercise (not counted in that 61.8% baseline). Run `pytest tests/unit/ tests/integration/` together with a real `GROQ_API_KEY` to see the fuller picture.
+**Coverage** is measured automatically on every `pytest` run (configured in `pytest.ini` / `.coveragerc`) and prints a per-file breakdown. From unit tests alone: **64.5% overall** — `config.py` and `hybrid_search.py` at 100%, but `pipeline.py` at just 6% and `vectorstore.py` at 20.4%, since their real logic only runs against live ChromaDB/embeddings/Groq calls, which the integration tests exercise (not counted in that baseline). Run `pytest tests/unit/ tests/integration/` together with a real `GROQ_API_KEY` to see the fuller picture.
 
 **Automation:** `.github/workflows/backend-tests.yml` runs the unit tests automatically on every push and pull request via GitHub Actions — no setup needed once this repo is on GitHub, since unit tests need no secrets. The integration tests are deliberately left out of that workflow because they need a real Groq key; if you want those automated too, add `GROQ_API_KEY` as a repository secret (Settings → Secrets and variables → Actions) and extend the workflow to pass it through and run `pytest tests/integration/`.
 
@@ -197,11 +216,16 @@ This started as a one-day build and has since grown well past the original three
 * Persistent evaluation history + in-app run comparison — **Done**
 * React frontend wired to all of the above — **Done**
 * Automated test suite (unit + integration) with CI on every push — **Done**
+* Intent router (`summary` / `targeted_qa` / `analysis`) directing retrieval strategy per request — **Done**, unit-tested; not yet run end-to-end with a live Groq key and real document
+* Positional (section-aware) sampling for "summary" intent, instead of similarity search against a topic that doesn't exist for vague requests — **Done**, unit-tested
+* Hybrid retrieval (BM25 keyword search + dense vector search) fused via Reciprocal Rank Fusion, for `targeted_qa`/`analysis` intents — **Done**, unit-tested
+* Retrieval-confidence check demoted to informational-only after real evidence showed it didn't track actual output quality; groundedness established as the real quality gate — **Done**
 
 **Still open, honestly:**
-* `RERANK_SCORE_WARNING_THRESHOLD` has only ever been calibrated against good matches — never against a confirmed-bad one. `test_scenario_1_deliberately_mismatched_topic` in `tests/integration/` exists specifically to close this gap; run it.
+* The intent router, hybrid+RRF retrieval, and span-coverage check are unit-tested against synthetic/mocked data but have not yet been exercised end-to-end against a real document with a live Groq key — that's the next real-world check to run.
 * Retrieval Precision@K/Recall@K/MRR (`evaluate_retrieval()`) exists but has no real labeled test set behind it yet.
 * Groundedness is vocabulary overlap, not true entailment — a report could reuse a source's words while misstating their meaning and still pass.
+* Some chunks' first `RERANK_SNIPPET_CHARS` characters can be page headers, figure captions, or table numbers rather than real content (seen on a real academic PDF) — this affects what the reranker actually scores. Trimming boilerplate before the snippet is taken would likely help; not yet done.
 
 ## Support
 
