@@ -60,6 +60,21 @@ RRF_K = 60
 # 60 is the standard default from the original RRF paper (Cormack et al.)
 # and widely reused as-is -- it just controls how quickly a rank's
 # contribution decays, not something this project has reason to tune.
+
+# --- Self-correction (adaptive retry) ---
+GROUNDEDNESS_THRESHOLD = 0.3
+# Shared between evaluation.py's pass/fail groundedness check and
+# pipeline.py's self-correction retry decision, so "grounded enough"
+# means the exact same thing in both places.
+MAX_RETRIEVAL_ATTEMPTS = 2
+# 1 initial attempt + 1 retry. If the first pass's report comes back
+# below GROUNDEDNESS_THRESHOLD, the pipeline reformulates its search
+# queries (avoiding the ones already tried) and retries retrieval +
+# generation once before settling for whichever attempt scored higher.
+# Only applies to "targeted_qa"/"analysis" intent -- "summary"'s
+# positional sampling doesn't depend on the search query at all, so
+# retrying with different search terms wouldn't change which chunks
+# get picked.
 RERANKER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 # ms-marco cross-encoders conventionally treat 0 as the relevant/irrelevant
 # boundary (positive = relevant, negative = not) -- this is a standard

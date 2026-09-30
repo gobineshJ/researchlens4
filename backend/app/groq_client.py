@@ -125,7 +125,8 @@ def filter_relevant_pages(candidates: list[dict], topic: str, instructions: str)
     return results
 
 
-def expand_query(instructions: str, num_variants: int = QUERY_EXPANSION_VARIANTS) -> list[str]:
+def expand_query(instructions: str, num_variants: int = QUERY_EXPANSION_VARIANTS,
+                  avoid: list[str] | None = None) -> list[str]:
     """
     Rewrites the user's instructions into a few more specific search
     queries. A short generic instruction ("focus on research gaps")
@@ -133,6 +134,11 @@ def expand_query(instructions: str, num_variants: int = QUERY_EXPANSION_VARIANTS
     for a handful of more concrete rewordings ("limitations of current
     methods", "authors' suggested future work") catches relevant chunks
     the original phrasing alone would miss.
+
+    `avoid`, when given, is a list of queries already tried (e.g. from a
+    first retrieval attempt that came back poorly grounded) -- the model
+    is asked to propose genuinely different angles instead of near-
+    duplicates of them. Used by pipeline.py's self-correction retry.
 
     Always returns the ORIGINAL instructions as the first element, even
     if the Groq call fails -- so a failure here degrades gracefully to
@@ -142,13 +148,21 @@ def expand_query(instructions: str, num_variants: int = QUERY_EXPANSION_VARIANTS
     if not GROQ_API_KEY:
         return queries  # can't expand without a key; fall back silently
 
+    avoid_clause = ""
+    if avoid:
+        avoid_list = "\n".join(f"- {q}" for q in avoid)
+        avoid_clause = (
+            "\n\nThese queries were already tried and didn't surface good results -- "
+            f"propose genuinely DIFFERENT angles, not close rewordings of them:\n{avoid_list}"
+        )
+
     system_prompt = (
         f"You rewrite a research report instruction into {num_variants} alternative, "
         "more specific search queries that would each surface different relevant "
         "passages from a document. Keep each query short (under 15 words) and "
         "focused on one concrete angle. Respond ONLY with JSON: "
         '{"queries": ["...", "...", "..."]} with exactly '
-        f"{num_variants} entries, no extra text."
+        f"{num_variants} entries, no extra text.{avoid_clause}"
     )
     try:
         # temperature=0 -- query expansion feeds retrieval directly, so it
@@ -167,6 +181,51 @@ def expand_query(instructions: str, num_variants: int = QUERY_EXPANSION_VARIANTS
         # over a "nice to have" retrieval improvement.
         pass
     return queries
+
+
+def decompose_query(instructions: str) -> list[str]:
+    """
+    Breaks a compound instruction into 2-3 independent sub-questions when
+    it genuinely asks about more than one thing (e.g. "what dataset did
+    they use, and what are the paper's main limitations?" -> two
+    sub-questions). Each sub-question then gets its own retrieval pass
+    (via expand_query + hybrid search), so evidence for EACH part gets
+    pulled in, rather than one query embedding averaging across both
+    topics and potentially missing one of them entirely.
+
+    This is query decomposition / "compositional" multi-hop: sub-
+    questions are retrieved independently and in parallel, not as a
+    chain where each hop's retrieved content shapes the next query (that
+    would be iterative multi-hop, which this does NOT implement -- being
+    upfront about that distinction matters for describing this honestly).
+
+    Returns [instructions] unchanged -- i.e. "no decomposition needed" --
+    when the instruction is already a single focused question/topic, or
+    on any failure. Never returns an empty list.
+    """
+    if not GROQ_API_KEY:
+        return [instructions]
+
+    system_prompt = (
+        "Decide whether this research report instruction asks about MULTIPLE "
+        "distinct things that would each need their own search of the source "
+        "document (e.g. two separate questions, or two unrelated aspects/themes "
+        "joined by 'and'), or whether it's really just ONE focused question or "
+        "topic even if it's phrased with multiple clauses.\n"
+        "If it's genuinely compound, split it into 2-3 independent "
+        "sub-questions, each answerable on its own. If it's already a single "
+        "focused question or topic, return it unchanged as the only entry.\n"
+        'Respond ONLY with JSON: {"sub_questions": ["...", "..."]}, no extra text.'
+    )
+    try:
+        # temperature=0 -- this decides how many separate retrieval passes
+        # run, so it needs to be deterministic like the other routing calls.
+        raw = _call_groq(GROQ_FILTER_MODEL, system_prompt, instructions, json_mode=True, temperature=0)
+        parsed = json.loads(raw)
+        sub_questions = [q.strip() for q in parsed.get("sub_questions", []) if isinstance(q, str) and q.strip()]
+        return sub_questions[:3] if sub_questions else [instructions]
+    except Exception:
+        return [instructions]
 
 
 def classify_intent(instructions: str) -> str:

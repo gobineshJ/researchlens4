@@ -209,6 +209,29 @@ def test_span_coverage_checks_each_source_independently():
 
 # ---------- Generation / groundedness ----------
 
+def test_compute_groundedness_returns_zero_with_no_citations():
+    assert evaluation.compute_groundedness("some report text", [], []) == 0.0
+
+
+def test_compute_groundedness_matches_validate_generation_value():
+    """compute_groundedness (used by pipeline.py's self-correction retry)
+    and validate_generation's own "groundedness" check must agree exactly --
+    otherwise the retry could decide to keep/discard a result based on a
+    number that doesn't match what the report itself will show."""
+    retrieved = [{"source_label": "paper.pdf, page 1",
+                  "text": "machine learning models require large labeled datasets for training"}]
+    report_text = "The paper states that machine learning models require large labeled datasets [1]."
+    citations = ["paper.pdf, page 1"]
+
+    raw_overlap = evaluation.compute_groundedness(report_text, citations, retrieved)
+
+    report = evaluation.EvaluationReport()
+    evaluation.validate_generation(report_text, citations, retrieved, report)
+    grounded_check = next(c for c in report.checks if c["name"] == "groundedness")
+
+    assert round(raw_overlap * 100, 1) == grounded_check["value"]
+
+
 def test_groundedness_passes_when_report_matches_sources():
     report = evaluation.EvaluationReport()
     retrieved = [{"source_label": "paper.pdf, page 1",

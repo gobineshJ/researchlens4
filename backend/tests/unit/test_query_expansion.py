@@ -68,6 +68,98 @@ def test_expand_query_calls_groq_with_zero_temperature(monkeypatch):
     assert captured_kwargs.get("temperature") == 0
 
 
+def test_expand_query_includes_avoid_list_in_prompt(monkeypatch):
+    """Self-correction retry passes previously-tried queries via `avoid` --
+    confirm they actually reach the prompt, not just get silently ignored."""
+    monkeypatch.setattr(groq_client, "GROQ_API_KEY", "fake_key_for_test")
+    captured = {}
+
+    def capturing_call(model, system_prompt, user_prompt, **kwargs):
+        captured["system_prompt"] = system_prompt
+        return '{"queries": ["a", "b", "c"]}'
+    monkeypatch.setattr(groq_client, "_call_groq", capturing_call)
+
+    groq_client.expand_query("focus on research gaps", avoid=["limitations of current methods"])
+    assert "limitations of current methods" in captured["system_prompt"]
+
+
+def test_expand_query_without_avoid_omits_avoid_clause(monkeypatch):
+    monkeypatch.setattr(groq_client, "GROQ_API_KEY", "fake_key_for_test")
+    captured = {}
+
+    def capturing_call(model, system_prompt, user_prompt, **kwargs):
+        captured["system_prompt"] = system_prompt
+        return '{"queries": ["a", "b", "c"]}'
+    monkeypatch.setattr(groq_client, "_call_groq", capturing_call)
+
+    groq_client.expand_query("focus on research gaps")
+    assert "already tried" not in captured["system_prompt"]
+
+
+# ---------- decompose_query (query decomposition / compositional multi-hop) ----------
+
+def test_decompose_query_falls_back_without_api_key(monkeypatch):
+    monkeypatch.setattr(groq_client, "GROQ_API_KEY", "")
+    assert groq_client.decompose_query("what dataset did they use?") == ["what dataset did they use?"]
+
+
+def test_decompose_query_falls_back_on_api_failure(monkeypatch):
+    monkeypatch.setattr(groq_client, "GROQ_API_KEY", "fake_key_for_test")
+    monkeypatch.setattr(groq_client, "_call_groq", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert groq_client.decompose_query("what dataset did they use?") == ["what dataset did they use?"]
+
+
+def test_decompose_query_returns_single_entry_for_focused_question(monkeypatch):
+    monkeypatch.setattr(groq_client, "GROQ_API_KEY", "fake_key_for_test")
+    monkeypatch.setattr(
+        groq_client, "_call_groq",
+        lambda *a, **k: '{"sub_questions": ["what dataset did they use?"]}',
+    )
+    result = groq_client.decompose_query("what dataset did they use?")
+    assert result == ["what dataset did they use?"]
+
+
+def test_decompose_query_splits_compound_instruction(monkeypatch):
+    monkeypatch.setattr(groq_client, "GROQ_API_KEY", "fake_key_for_test")
+    monkeypatch.setattr(
+        groq_client, "_call_groq",
+        lambda *a, **k: '{"sub_questions": ["what dataset did they use?", "what are the main limitations?"]}',
+    )
+    result = groq_client.decompose_query("what dataset did they use, and what are the main limitations?")
+    assert len(result) == 2
+    assert "what dataset did they use?" in result
+    assert "what are the main limitations?" in result
+
+
+def test_decompose_query_caps_at_three_sub_questions(monkeypatch):
+    monkeypatch.setattr(groq_client, "GROQ_API_KEY", "fake_key_for_test")
+    monkeypatch.setattr(
+        groq_client, "_call_groq",
+        lambda *a, **k: '{"sub_questions": ["a", "b", "c", "d", "e"]}',
+    )
+    result = groq_client.decompose_query("a compound question with many parts")
+    assert len(result) == 3
+
+
+def test_decompose_query_falls_back_on_empty_response(monkeypatch):
+    monkeypatch.setattr(groq_client, "GROQ_API_KEY", "fake_key_for_test")
+    monkeypatch.setattr(groq_client, "_call_groq", lambda *a, **k: '{"sub_questions": []}')
+    assert groq_client.decompose_query("what dataset did they use?") == ["what dataset did they use?"]
+
+
+def test_decompose_query_calls_groq_with_zero_temperature(monkeypatch):
+    monkeypatch.setattr(groq_client, "GROQ_API_KEY", "fake_key_for_test")
+    captured_kwargs = {}
+
+    def capturing_call(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return '{"sub_questions": ["x"]}'
+    monkeypatch.setattr(groq_client, "_call_groq", capturing_call)
+
+    groq_client.decompose_query("what dataset did they use?")
+    assert captured_kwargs.get("temperature") == 0
+
+
 def test_classify_intent_falls_back_without_api_key(monkeypatch):
     monkeypatch.setattr(groq_client, "GROQ_API_KEY", "")
     assert groq_client.classify_intent("summarize this document") == "targeted_qa"
