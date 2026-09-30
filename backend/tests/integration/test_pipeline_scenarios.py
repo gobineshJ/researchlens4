@@ -26,8 +26,17 @@ pytestmark = pytest.mark.skipif(
 def test_scenario_1_deliberately_mismatched_topic(sample_pdf):
     """
     Scenario 1: ask for something the document doesn't cover at all.
-    Expect retrieval confidence and/or groundedness to genuinely fail --
-    if they don't, the thresholds are too loose to catch real problems.
+    Expect groundedness to genuinely fail -- if it doesn't, the
+    threshold is too loose to catch real problems.
+
+    Retrieval "confidence" (rerank score / distance) is deliberately NOT
+    checked here: across three real comparison runs it tracked the WRONG
+    direction relative to actual output quality (see evaluation.py's
+    validate_retrieval_confidence docstring), so it was demoted to an
+    informational-only check that always passes. Groundedness -- word
+    overlap between the report and its cited sources -- was correct in
+    all three of those comparisons, so it's the real signal this test
+    relies on.
     """
     result = run_pipeline(
         file_paths=[sample_pdf],
@@ -35,17 +44,11 @@ def test_scenario_1_deliberately_mismatched_topic(sample_pdf):
         instructions="Summarize this paper's discussion of 16th-century naval warfare tactics.",
     )
     checks = result["evaluation"]["checks"]
-    retrieval_confidence = next((c for c in checks if c["name"] == "confidence"), None)
     groundedness = next((c for c in checks if c["name"] == "groundedness"), None)
 
-    # At least one of these should catch the mismatch -- assert on whichever
-    # ran (groundedness only runs if something got cited at all).
-    caught_mismatch = (retrieval_confidence and not retrieval_confidence["passed"]) or \
-                       (groundedness and not groundedness["passed"])
-    assert caught_mismatch, (
-        "Neither retrieval confidence nor groundedness caught a deliberately "
-        "unrelated topic -- thresholds may be too loose. "
-        f"Checks: {checks}"
+    assert groundedness is not None and not groundedness["passed"], (
+        "Groundedness didn't catch a deliberately unrelated topic -- "
+        f"the threshold may be too loose. Checks: {checks}"
     )
 
 

@@ -68,6 +68,60 @@ def test_expand_query_calls_groq_with_zero_temperature(monkeypatch):
     assert captured_kwargs.get("temperature") == 0
 
 
+def test_classify_intent_falls_back_without_api_key(monkeypatch):
+    monkeypatch.setattr(groq_client, "GROQ_API_KEY", "")
+    assert groq_client.classify_intent("summarize this document") == "targeted_qa"
+
+
+def test_classify_intent_falls_back_on_api_failure(monkeypatch):
+    monkeypatch.setattr(groq_client, "GROQ_API_KEY", "fake_key_for_test")
+
+    def broken_call(*args, **kwargs):
+        raise RuntimeError("simulated network failure")
+    monkeypatch.setattr(groq_client, "_call_groq", broken_call)
+
+    assert groq_client.classify_intent("summarize this document") == "targeted_qa"
+
+
+def test_classify_intent_returns_summary_when_groq_says_so(monkeypatch):
+    monkeypatch.setattr(groq_client, "GROQ_API_KEY", "fake_key_for_test")
+    monkeypatch.setattr(groq_client, "_call_groq", lambda *a, **k: '{"intent": "summary"}')
+    assert groq_client.classify_intent("summarize this paper") == "summary"
+
+
+def test_classify_intent_returns_analysis_when_groq_says_so(monkeypatch):
+    monkeypatch.setattr(groq_client, "GROQ_API_KEY", "fake_key_for_test")
+    monkeypatch.setattr(groq_client, "_call_groq", lambda *a, **k: '{"intent": "analysis"}')
+    assert groq_client.classify_intent("discuss the limitations of this approach") == "analysis"
+
+
+def test_classify_intent_falls_back_on_unrecognized_label(monkeypatch):
+    """A model that returns something outside the three known labels
+    should fall back to the safe default, not propagate garbage."""
+    monkeypatch.setattr(groq_client, "GROQ_API_KEY", "fake_key_for_test")
+    monkeypatch.setattr(groq_client, "_call_groq", lambda *a, **k: '{"intent": "something_else"}')
+    assert groq_client.classify_intent("what is this about?") == "targeted_qa"
+
+
+def test_classify_intent_falls_back_on_malformed_json(monkeypatch):
+    monkeypatch.setattr(groq_client, "GROQ_API_KEY", "fake_key_for_test")
+    monkeypatch.setattr(groq_client, "_call_groq", lambda *a, **k: "not valid json")
+    assert groq_client.classify_intent("what dataset did they use?") == "targeted_qa"
+
+
+def test_classify_intent_calls_groq_with_zero_temperature(monkeypatch):
+    monkeypatch.setattr(groq_client, "GROQ_API_KEY", "fake_key_for_test")
+    captured_kwargs = {}
+
+    def capturing_call(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return '{"intent": "targeted_qa"}'
+    monkeypatch.setattr(groq_client, "_call_groq", capturing_call)
+
+    groq_client.classify_intent("what dataset did they use?")
+    assert captured_kwargs.get("temperature") == 0
+
+
 def test_filter_relevant_pages_calls_groq_with_zero_temperature(monkeypatch):
     monkeypatch.setattr(groq_client, "GROQ_API_KEY", "fake_key_for_test")
     captured_kwargs = {}

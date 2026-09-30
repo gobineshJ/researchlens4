@@ -35,6 +35,11 @@ TOP_K_CHUNKS_PER_SOURCE = 5   # used per document when there are multiple --
                               # guarantees every uploaded file/page gets
                               # representation instead of one global top-k
                               # that can silently drop an entire document
+ANALYSIS_TOP_K_MULTIPLIER = 1.6
+# "analysis" instructions (discuss/compare/synthesize a theme) genuinely
+# need more supporting evidence than a narrow "targeted_qa" lookup -- a
+# wider net than the base per-source k, but still nowhere near a full
+# document sample (that's what "summary" intent is for).
 
 # --- Query expansion ---
 # A short generic instruction ("focus on research gaps") embeds poorly
@@ -49,6 +54,12 @@ QUERY_EXPANSION_VARIANTS = 3   # extra rewordings generated per request (plus th
 # catches cases where embedding similarity and true relevance diverge,
 # which plain vector distance alone can miss.
 CANDIDATE_OVERSAMPLE_FACTOR = 3     # retrieve this many times TOP_K before reranking down
+RRF_K = 60
+# Reciprocal Rank Fusion constant for combining the BM25 and vector
+# rankings: score = sum(1 / (RRF_K + rank)) across both ranked lists.
+# 60 is the standard default from the original RRF paper (Cormack et al.)
+# and widely reused as-is -- it just controls how quickly a rank's
+# contribution decays, not something this project has reason to tune.
 RERANKER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 # ms-marco cross-encoders conventionally treat 0 as the relevant/irrelevant
 # boundary (positive = relevant, negative = not) -- this is a standard

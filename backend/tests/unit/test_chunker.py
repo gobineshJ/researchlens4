@@ -57,3 +57,37 @@ def test_chunk_all_flattens_multiple_records():
     records = [_make_record(50), _make_record(50)]
     chunks = chunker.chunk_all(records)
     assert len(chunks) == 2
+
+
+# ---------- sample_representative (positional sampling for "summary" intent) ----------
+
+def _numbered_chunks(n: int) -> list[dict]:
+    """Chunks tagged with their own index in `text`, so tests can check
+    WHICH ones got picked, not just how many."""
+    return [{"text": f"chunk-{i}", "source_label": "x", "source_type": "file"} for i in range(n)]
+
+
+def test_sample_representative_returns_all_when_fewer_than_k():
+    chunks = _numbered_chunks(3)
+    result = chunker.sample_representative(chunks, 5)
+    assert result == chunks
+
+
+def test_sample_representative_spans_evenly_across_document():
+    chunks = _numbered_chunks(100)
+    result = chunker.sample_representative(chunks, 5)
+    indices = [int(c["text"].split("-")[1]) for c in result]
+    assert indices == [0, 20, 40, 60, 80]
+
+
+def test_sample_representative_returns_exactly_k_chunks():
+    chunks = _numbered_chunks(100)
+    result = chunker.sample_representative(chunks, 10)
+    assert len(result) == 10
+    # No duplicates -- every picked chunk should be a distinct position
+    assert len({c["text"] for c in result}) == 10
+
+
+def test_sample_representative_handles_k_zero():
+    chunks = _numbered_chunks(10)
+    assert chunker.sample_representative(chunks, 0) == []
