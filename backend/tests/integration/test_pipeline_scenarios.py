@@ -37,6 +37,13 @@ def test_scenario_1_deliberately_mismatched_topic(sample_pdf):
     overlap between the report and its cited sources -- was correct in
     all three of those comparisons, so it's the real signal this test
     relies on.
+
+    Note: if this instruction gets classified as "targeted_qa"/"analysis"
+    rather than "summary", the pipeline's self-correction retry will fire
+    here too (since groundedness will come back low) and try reformulated
+    queries once before giving up -- but a topic genuinely absent from the
+    document should stay ungrounded even after a retry, so the assertion
+    below should still hold either way.
     """
     result = run_pipeline(
         file_paths=[sample_pdf],

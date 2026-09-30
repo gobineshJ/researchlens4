@@ -12,8 +12,49 @@ from pathlib import Path
 from . import doc_parser, scraper, groq_client, chunker, vectorstore, pdf_export, evaluation, reranker, hybrid_search
 from .config import (
     TOP_K_CHUNKS, TOP_K_CHUNKS_PER_SOURCE, CANDIDATE_OVERSAMPLE_FACTOR,
-    ANALYSIS_TOP_K_MULTIPLIER, RRF_K,
+    ANALYSIS_TOP_K_MULTIPLIER, RRF_K, GROUNDEDNESS_THRESHOLD, MAX_RETRIEVAL_ATTEMPTS,
 )
+
+
+def _dedupe_preserve_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+
+def _hybrid_retrieve_and_rerank(source_names: list[str], chunks_by_source: dict[str, list[dict]],
+                                 collection, queries: list[str], final_k: int, oversample_k: int) -> list[dict]:
+    """
+    Runs the hybrid (BM25 + vector, RRF-fused) retrieval + cross-encoder
+    reranking pipeline, per source document, for a given list of search
+    queries. Shared by the initial retrieval attempt and the self-
+    correction retry (which calls this again with reformulated queries)
+    so both go through exactly the same retrieval logic.
+    """
+    retrieved: list[dict] = []
+    for name in source_names:
+        source_chunks = chunks_by_source[name]
+        bm25_index, bm25_chunks = hybrid_search.build_index(source_chunks)
+
+        fused_by_text: dict[str, dict] = {}
+        for query in queries:
+            vector_ranked = vectorstore.retrieve_candidates(
+                collection, [query], k_per_query=oversample_k, source_name=name
+            )
+            bm25_ranked = hybrid_search.search(bm25_index, bm25_chunks, query, top_k=oversample_k)
+            fused = hybrid_search.fuse_rrf(vector_ranked, bm25_ranked, k_rrf=RRF_K)
+            for chunk in fused:
+                text = chunk["text"]
+                if text not in fused_by_text or chunk["rrf_score"] > fused_by_text[text]["rrf_score"]:
+                    fused_by_text[text] = chunk
+
+        candidates = sorted(fused_by_text.values(), key=lambda c: c["rrf_score"], reverse=True)[:oversample_k]
+        retrieved.extend(reranker.rerank_with_fallback(queries, candidates, top_k=final_k))
+    return retrieved
 
 
 def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str) -> dict:
@@ -78,16 +119,25 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
     #       filter it down by relevance.
     #
     #   "targeted_qa" / "analysis" -- a real topic exists to search for.
-    #       For each source document and each expanded query variant,
-    #       both dense vector search AND BM25 keyword search run
-    #       independently, then their two RANKINGS (not raw scores,
-    #       which live on incomparable scales) are combined with
-    #       Reciprocal Rank Fusion. This catches both exact-term matches
-    #       (a specific dataset/method name BM25 catches but embeddings
-    #       might not rank highly) and semantic matches (paraphrases
-    #       BM25 would miss entirely). The best-scoring fused candidates
-    #       per source are then reranked by the cross-encoder, same as
-    #       before. "analysis" gets a wider final_k than "targeted_qa" --
+    #       First, query decomposition (groq_client.decompose_query) checks
+    #       whether the instruction actually asks about MULTIPLE distinct
+    #       things ("what dataset did they use, and what are the paper's
+    #       limitations?") -- if so, each sub-question gets expanded and
+    #       retrieved independently, so evidence for each part gets pulled
+    #       in rather than one averaged embedding missing one of them. This
+    #       is query decomposition / "compositional" multi-hop: sub-
+    #       questions are retrieved independently and in parallel, not as
+    #       a chain where one hop's results shape the next query (that
+    #       would be iterative multi-hop, which this does not implement).
+    #       For each source document and each resulting query, both dense
+    #       vector search AND BM25 keyword search run independently, then
+    #       their two RANKINGS (not raw scores, which live on incomparable
+    #       scales) are combined with Reciprocal Rank Fusion. This catches
+    #       both exact-term matches (a specific dataset/method name BM25
+    #       catches but embeddings might not rank highly) and semantic
+    #       matches (paraphrases BM25 would miss). The best-scoring fused
+    #       candidates per source are then reranked by the cross-encoder.
+    #       "analysis" gets a wider final_k than "targeted_qa" --
     #       synthesizing a theme genuinely needs more supporting evidence
     #       than answering one narrow question.
     with report.timed_stage("retrieval"):
@@ -107,48 +157,89 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
             }[intent],
         )
 
-        expanded_queries = groq_client.expand_query(instructions)
         multi_source = len(source_names) > 1
         base_k = TOP_K_CHUNKS_PER_SOURCE if multi_source else TOP_K_CHUNKS
         final_k = round(base_k * ANALYSIS_TOP_K_MULTIPLIER) if intent == "analysis" else base_k
         oversample_k = final_k * CANDIDATE_OVERSAMPLE_FACTOR
 
+        sub_questions: list[str] = [instructions]
         retrieved: list[dict] = []
-        for name in source_names:
-            source_chunks = chunks_by_source[name]
 
-            if intent == "summary":
-                sample = chunker.sample_representative(source_chunks, final_k)
+        if intent == "summary":
+            expanded_queries = groq_client.expand_query(instructions)
+            for name in source_names:
+                sample = chunker.sample_representative(chunks_by_source[name], final_k)
                 retrieved.extend(reranker.rerank_with_fallback(expanded_queries, sample, top_k=final_k))
-                continue
+        else:
+            sub_questions = groq_client.decompose_query(instructions)
+            is_decomposed = len(sub_questions) > 1
+            report.add_check(
+                "retrieval", "query_decomposition", True,
+                (f"Instruction decomposed into {len(sub_questions)} independent sub-questions, "
+                 f"each retrieved separately: {sub_questions}") if is_decomposed
+                else f"Instruction treated as a single focused question (no decomposition needed): {sub_questions[0]!r}",
+            )
+            expanded_queries = _dedupe_preserve_order(
+                q for sq in sub_questions for q in groq_client.expand_query(sq)
+            )
+            retrieved = _hybrid_retrieve_and_rerank(
+                source_names, chunks_by_source, collection, expanded_queries, final_k, oversample_k
+            )
 
-            bm25_index, bm25_chunks = hybrid_search.build_index(source_chunks)
-
-            fused_by_text: dict[str, dict] = {}
-            for query in expanded_queries:
-                vector_ranked = vectorstore.retrieve_candidates(
-                    collection, [query], k_per_query=oversample_k, source_name=name
-                )
-                bm25_ranked = hybrid_search.search(bm25_index, bm25_chunks, query, top_k=oversample_k)
-                fused = hybrid_search.fuse_rrf(vector_ranked, bm25_ranked, k_rrf=RRF_K)
-                for chunk in fused:
-                    text = chunk["text"]
-                    if text not in fused_by_text or chunk["rrf_score"] > fused_by_text[text]["rrf_score"]:
-                        fused_by_text[text] = chunk
-
-            candidates = sorted(fused_by_text.values(), key=lambda c: c["rrf_score"], reverse=True)[:oversample_k]
-            retrieved.extend(reranker.rerank_with_fallback(expanded_queries, candidates, top_k=final_k))
-
-    evaluation.validate_retrieval_confidence(retrieved, report)
-    evaluation.validate_source_coverage(source_names, retrieved, report)
-    if intent == "summary":
-        evaluation.validate_span_coverage(chunks_by_source, retrieved, report)
-
-    # --- Stage 8: Groq report generation ---
+    # --- Stage 8: Groq report generation (with one self-correction retry) ---
     generation_result = {"report_text": "", "citations_used": []}
     with report.timed_stage("generation"):
         if retrieved:
             generation_result = groq_client.generate_report(retrieved, instructions)
+
+    # Self-correction: if the first pass came back poorly grounded, retry
+    # retrieval once with reformulated queries before settling for it.
+    # Only for "targeted_qa"/"analysis" -- "summary"'s positional sampling
+    # doesn't depend on the search query, so reformulating it wouldn't
+    # change which chunks get picked.
+    if intent != "summary" and MAX_RETRIEVAL_ATTEMPTS > 1 and retrieved:
+        original_groundedness = evaluation.compute_groundedness(
+            generation_result["report_text"], generation_result["citations_used"], retrieved
+        )
+        if original_groundedness < GROUNDEDNESS_THRESHOLD:
+            with report.timed_stage("self_correction_retry"):
+                retry_queries = _dedupe_preserve_order(
+                    q for sq in sub_questions
+                    for q in groq_client.expand_query(sq, avoid=expanded_queries)
+                )
+                retried = _hybrid_retrieve_and_rerank(
+                    source_names, chunks_by_source, collection, retry_queries, final_k, oversample_k
+                )
+                retry_generation = groq_client.generate_report(retried, instructions) if retried else generation_result
+                retry_groundedness = (
+                    evaluation.compute_groundedness(
+                        retry_generation["report_text"], retry_generation["citations_used"], retried
+                    ) if retried else original_groundedness
+                )
+                improved = bool(retried) and retry_groundedness > original_groundedness
+                report.add_check(
+                    "generation", "self_correction", True,
+                    f"Initial groundedness {original_groundedness:.0%} was below the "
+                    f"{GROUNDEDNESS_THRESHOLD:.0%} threshold; retried retrieval with "
+                    f"{len(retry_queries)} reformulated quer{'y' if len(retry_queries) == 1 else 'ies'} "
+                    f"-> {retry_groundedness:.0%}. " +
+                    ("Retry improved groundedness -- using the retried result."
+                     if improved else
+                     "Retry did not improve groundedness -- keeping the original result."),
+                    value=round((retry_groundedness - original_groundedness) * 100, 1),
+                )
+                if improved:
+                    retrieved = retried
+                    generation_result = retry_generation
+
+    # Evaluation checks that depend on the FINAL retrieved/generated
+    # result run once, here -- after any self-correction retry has been
+    # decided, so they reflect what was actually returned, not a
+    # since-discarded first attempt.
+    evaluation.validate_retrieval_confidence(retrieved, report)
+    evaluation.validate_source_coverage(source_names, retrieved, report)
+    if intent == "summary":
+        evaluation.validate_span_coverage(chunks_by_source, retrieved, report)
     evaluation.validate_generation(
         generation_result["report_text"], generation_result["citations_used"], retrieved, report
     )

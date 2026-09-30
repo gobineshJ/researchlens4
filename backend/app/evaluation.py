@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 
 from .config import (
     CHUNK_SIZE_TOKENS, CHUNK_OVERLAP_RATIO, CRAWL_MAX_DEPTH, CRAWL_SAME_DOMAIN_ONLY,
-    RERANK_SCORE_WARNING_THRESHOLD, EVALUATION_LOG_PATH,
+    RERANK_SCORE_WARNING_THRESHOLD, EVALUATION_LOG_PATH, GROUNDEDNESS_THRESHOLD,
 )
 
 
@@ -321,6 +321,27 @@ def _significant_words(text: str) -> set[str]:
     return {w for w in words if len(w) > 3 and w not in _STOPWORDS}
 
 
+def compute_groundedness(report_text: str, citations_used: list[str], retrieved_chunks: list[dict]) -> float:
+    """
+    Returns the raw overlap fraction (0.0-1.0) between the report's
+    significant vocabulary and the text of its cited chunks. A coarse
+    proxy (word overlap, not entailment) -- catches wholesale fabrication
+    or drift far from the source material, though a report could still
+    reuse a source's words while getting the meaning wrong.
+
+    Pulled out of validate_generation so pipeline.py's self-correction
+    retry can compute the SAME number to decide whether a retry is worth
+    trying, instead of a second, potentially inconsistent definition of
+    "grounded".
+    """
+    if not citations_used:
+        return 0.0
+    cited_text = " ".join(c["text"] for c in retrieved_chunks if c["source_label"] in citations_used)
+    source_words = _significant_words(cited_text)
+    report_words = _significant_words(report_text)
+    return len(report_words & source_words) / len(report_words) if report_words else 0.0
+
+
 def validate_generation(report_text: str, citations_used: list[str], retrieved_chunks: list[dict],
                          report: EvaluationReport):
     stage = "generation"
@@ -342,21 +363,17 @@ def validate_generation(report_text: str, citations_used: list[str], retrieved_c
     # Groundedness: not just "did it cite something" (too weak -- a report can
     # cite a source while actually saying something the source never mentions).
     # Instead, check how much of the report's actual vocabulary shows up
-    # anywhere in the cited chunks' text. This is a coarse proxy (word overlap,
-    # not entailment), but it catches wholesale fabrication or drift far
-    # from the source material, which "citations_used is non-empty" cannot.
+    # anywhere in the cited chunks' text.
     if not citations_used:
         report.add_check(stage, "groundedness", False, "Report cites zero sources -- not grounded in retrieved evidence.")
     else:
-        cited_text = " ".join(c["text"] for c in retrieved_chunks if c["source_label"] in citations_used)
-        source_words = _significant_words(cited_text)
-        report_words = _significant_words(report_text)
-        overlap = len(report_words & source_words) / len(report_words) if report_words else 0.0
-        grounded = overlap >= 0.3
+        overlap = compute_groundedness(report_text, citations_used, retrieved_chunks)
+        grounded = overlap >= GROUNDEDNESS_THRESHOLD
         report.add_check(
             stage, "groundedness", grounded,
             f"{overlap:.0%} of the report's significant vocabulary appears in its cited sources "
-            f"(threshold 30%)." + ("" if grounded else " Low overlap suggests possible drift from source content."),
+            f"(threshold {GROUNDEDNESS_THRESHOLD:.0%})." +
+            ("" if grounded else " Low overlap suggests possible drift from source content."),
             value=round(overlap * 100, 1),
         )
 
