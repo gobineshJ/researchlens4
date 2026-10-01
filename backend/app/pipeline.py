@@ -7,12 +7,14 @@ separate afterthought.
 """
 
 import uuid
+from collections import Counter
 from pathlib import Path
 
 from . import doc_parser, scraper, groq_client, chunker, vectorstore, pdf_export, evaluation, reranker, hybrid_search
 from .config import (
     TOP_K_CHUNKS, TOP_K_CHUNKS_PER_SOURCE, CANDIDATE_OVERSAMPLE_FACTOR,
     ANALYSIS_TOP_K_MULTIPLIER, RRF_K, GROUNDEDNESS_THRESHOLD, MAX_RETRIEVAL_ATTEMPTS,
+    GROQ_MAX_CONTEXT_TOKENS, SUMMARY_MAX_EXCERPTS_PER_SOURCE, SUMMARY_MIN_EXCERPT_TOKENS,
 )
 
 
@@ -166,10 +168,88 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
         retrieved: list[dict] = []
 
         if intent == "summary":
-            expanded_queries = groq_client.expand_query(instructions)
-            for name in source_names:
-                sample = chunker.sample_representative(chunks_by_source[name], final_k)
-                retrieved.extend(reranker.rerank_with_fallback(expanded_queries, sample, top_k=final_k))
+            # No query expansion and no cross-encoder on this path. Both only
+            # make sense when there is a topic to rank AGAINST, and there
+            # isn't one: positional sampling has already chosen the chunks,
+            # and reranking with top_k == len(sample) cannot filter anything,
+            # it can only reorder. That reordering is what let the context
+            # budget trim drop a document's opening chunks by relevance rank
+            # and collapse its span. Document order is also simply the right
+            # order for a summary prompt -- a model asked to summarize reads
+            # better from a document's beginning to its end than from its
+            # most "relevant" passage to its least.
+            expanded_queries = [instructions]
+            # Sample from each document's CONTENT. A paper's last chunks are
+            # usually reference lists or figure captions, so "first and last
+            # chunk" would otherwise mean "abstract and bibliography".
+            summary_chunks_by_source = {
+                name: chunker.content_chunks(chunks_by_source[name]) for name in source_names
+            }
+            excluded: dict[str, Counter] = {
+                name: Counter(
+                    kind for c in chunks_by_source[name]
+                    if (kind := chunker.back_matter_kind(c["text"])) is not None
+                )
+                for name in source_names
+                if len(summary_chunks_by_source[name]) < len(chunks_by_source[name])
+            }
+            report.add_check(
+                "retrieval", "back_matter", True,
+                "Excluded from summary sampling: " + "; ".join(
+                    f"{name}: {sum(kinds.values())} of {len(chunks_by_source[name])} chunk(s) "
+                    f"(" + ", ".join(f"{n} {kind}" for kind, n in kinds.most_common()) + ")"
+                    for name, kinds in excluded.items()
+                ) + "."
+                if excluded
+                else "No reference lists, figure captions, affiliations or acknowledgements "
+                     "detected -- sampling from every chunk.",
+                value=sum(sum(k.values()) for k in excluded.values()),
+            )
+
+            # One request has to cover every document, and real chunks are
+            # ~1000 tokens -- whole chunks would mean under two per paper.
+            # So spend the budget on POSITIONS: evenly spaced excerpts from
+            # each document's first content chunk to its last, each trimmed
+            # to an equal share of the budget (chunker.plan_summary_excerpts).
+            # Sizing this up front also means the budget trim below never
+            # has to drop anything, which is what collapsed span coverage
+            # when it dropped whole chunks by relevance rank.
+            samples, excerpt_cap = chunker.plan_summary_excerpts(
+                summary_chunks_by_source, SUMMARY_MAX_EXCERPTS_PER_SOURCE,
+                GROQ_MAX_CONTEXT_TOKENS, SUMMARY_MIN_EXCERPT_TOKENS,
+            )
+            sampled = [c for name in source_names for c in samples.get(name, [])]
+            full_tokens = [chunker.estimate_tokens(c["text"])
+                           for chunks in summary_chunks_by_source.values() for c in chunks]
+            typical = sorted(full_tokens)[len(full_tokens) // 2] if full_tokens else 0
+            trimmed = sum(
+                1 for name in source_names for excerpt, original in zip(
+                    samples.get(name, []),
+                    chunker.sample_representative(summary_chunks_by_source[name],
+                                                  len(samples.get(name, []))),
+                ) if excerpt["text"] != original["text"]
+            )
+            too_thin = excerpt_cap < SUMMARY_MIN_EXCERPT_TOKENS and trimmed > 0
+            sizes_text = ", ".join(f"{name}: {len(samples.get(name, []))}" for name in source_names)
+            report.add_check(
+                "retrieval", "budget_fit", not too_thin,
+                f"{len(source_names)} documents need at least 2 excerpts each, which leaves "
+                f"only ~{excerpt_cap} tokens per excerpt in the {GROQ_MAX_CONTEXT_TOKENS}-token "
+                f"budget -- below the {SUMMARY_MIN_EXCERPT_TOKENS}-token minimum, so each one "
+                f"says little. Summarize fewer documents per run or raise "
+                f"GROQ_MAX_CONTEXT_TOKENS."
+                if too_thin
+                else f"{len(sampled)} excerpt(s) at evenly spaced positions ({sizes_text}); "
+                     f"{trimmed} trimmed to ~{excerpt_cap} tokens (a typical chunk is "
+                     f"~{typical}) so all of them fit the {GROQ_MAX_CONTEXT_TOKENS}-token "
+                     f"budget. A summary needs to see how each document begins, develops "
+                     f"and ends more than it needs any one passage whole."
+                if trimmed
+                else f"{len(sampled)} whole chunk(s) at evenly spaced positions ({sizes_text}) "
+                     f"fit the {GROQ_MAX_CONTEXT_TOKENS}-token budget without trimming.",
+                value=len(sampled),
+            )
+            retrieved.extend(sampled)
         else:
             sub_questions = groq_client.decompose_query(instructions)
             is_decomposed = len(sub_questions) > 1
@@ -187,6 +267,15 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
             )
 
     # --- Stage 8: Groq report generation (with one self-correction retry) ---
+    # Trim to the generation context budget BEFORE generating, and keep the
+    # trimmed list as `retrieved`, so the evaluation checks below measure
+    # the chunks the model actually saw.
+    # preserve_span: for "summary", consider chunks for keeping in
+    # endpoint-first position order, so even if the estimate above is
+    # slightly off this trim cannot drop a document's first or last
+    # sampled chunk and undo the positional sampling.
+    retrieved = groq_client.fit_chunks_to_budget(retrieved, preserve_span=(intent == "summary"))
+
     generation_result = {"report_text": "", "citations_used": []}
     with report.timed_stage("generation"):
         if retrieved:
@@ -207,9 +296,9 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
                     q for sq in sub_questions
                     for q in groq_client.expand_query(sq, avoid=expanded_queries)
                 )
-                retried = _hybrid_retrieve_and_rerank(
+                retried = groq_client.fit_chunks_to_budget(_hybrid_retrieve_and_rerank(
                     source_names, chunks_by_source, collection, retry_queries, final_k, oversample_k
-                )
+                ))
                 retry_generation = groq_client.generate_report(retried, instructions) if retried else generation_result
                 retry_groundedness = (
                     evaluation.compute_groundedness(
@@ -239,7 +328,7 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
     evaluation.validate_retrieval_confidence(retrieved, report)
     evaluation.validate_source_coverage(source_names, retrieved, report)
     if intent == "summary":
-        evaluation.validate_span_coverage(chunks_by_source, retrieved, report)
+        evaluation.validate_span_coverage(summary_chunks_by_source, retrieved, report)
     evaluation.validate_generation(
         generation_result["report_text"], generation_result["citations_used"], retrieved, report
     )

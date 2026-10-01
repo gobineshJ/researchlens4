@@ -15,6 +15,18 @@ import docx
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+@pytest.fixture(autouse=True)
+def _isolated_run_history(tmp_path, monkeypatch):
+    """
+    Every run_pipeline call appends to the run history. Without this, every
+    test run -- unit tests included -- wrote into the REAL
+    evaluation_log.jsonl that the UI's "Run history" panel reads, burying
+    real runs under hundreds of "Discuss the topic" entries.
+    """
+    from app import evaluation
+    monkeypatch.setattr(evaluation, "EVALUATION_LOG_PATH", str(tmp_path / "evaluation_log.jsonl"))
+
+
 @pytest.fixture
 def sample_pdf(tmp_path) -> str:
     """A 2-page PDF with distinct, known text on each page."""

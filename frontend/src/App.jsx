@@ -254,7 +254,10 @@ function EvaluationPanel({ evaluation }) {
           {evaluation.checks.map((check, i) => (
             <tr key={i}>
               <td style={styles.td}>{check.stage}</td>
-              <td style={styles.td}>{check.name}</td>
+              <td style={styles.td}>
+                {check.name}
+                {check.subject && <div style={styles.checkSubject}>{check.subject}</div>}
+              </td>
               <td style={{ ...styles.td, color: check.passed ? "#2a7a2a" : "#b02a2a" }}>
                 {check.passed ? "✓" : "✗"}
               </td>
@@ -340,4 +343,7 @@ const styles = {
   table: { width: "100%", borderCollapse: "collapse", marginTop: "0.5rem" },
   th: { textAlign: "left", borderBottom: "2px solid #ccc", padding: "0.4rem" },
   td: { borderBottom: "1px solid #eee", padding: "0.4rem", fontSize: "0.9rem" },
+  // span_coverage runs once per uploaded document, so its rows all share a
+  // name -- the subject line is what tells them apart at a glance.
+  checkSubject: { fontSize: "0.78rem", color: "#666", wordBreak: "break-word" },
 };

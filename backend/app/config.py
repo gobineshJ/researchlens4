@@ -17,6 +17,14 @@ GROQ_GENERATION_MODEL = "openai/gpt-oss-120b"  # higher quality — used once pe
 # were decommissioned by Groq on 2026-08-16. These are Groq's recommended
 # replacements as of this update -- check console.groq.com/docs/deprecations
 # if you hit a 404 again in future, since Groq's free-tier lineup does change.
+GROQ_MAX_CONTEXT_TOKENS = int(os.getenv("GROQ_MAX_CONTEXT_TOKENS", "5000"))
+# Upper bound on source-excerpt tokens sent to generate_report in one
+# request. Groq rejects any single request larger than the model's
+# tokens-per-minute limit with "413 Payload Too Large" -- on the free tier
+# that's ~8000 TPM for gpt-oss-120b, and the budget has to leave room for
+# the prompt and the generated report itself. Multi-source runs retrieve
+# 5-8 chunks PER SOURCE at ~650 tokens each, so without a cap a handful of
+# documents blows straight past that limit. Raise this on a paid tier.
 
 # --- Crawl / discovery ---
 CRAWL_MAX_DEPTH = 2
@@ -26,7 +34,13 @@ REQUEST_TIMEOUT = 8
 USER_AGENT = "ResearchLens-Bot/0.1 (training project; respects robots.txt)"
 
 # --- Chunking ---
-CHUNK_SIZE_TOKENS = 650
+CHUNK_SIZE_WORDS = 650
+# WORDS, not model tokens -- chunker splits on whitespace, and this was
+# named CHUNK_SIZE_TOKENS while the context budget above counts tokens as
+# len(text)//4. The two units differ by roughly 1.5x (a 650-word chunk is
+# ~1000 budget tokens), so reading one as the other silently understates
+# how much of GROQ_MAX_CONTEXT_TOKENS each chunk actually consumes --
+# which is how a run ended up fitting half as many chunks as expected.
 CHUNK_OVERLAP_RATIO = 0.15
 
 # --- Retrieval ---
@@ -40,6 +54,17 @@ ANALYSIS_TOP_K_MULTIPLIER = 1.6
 # need more supporting evidence than a narrow "targeted_qa" lookup -- a
 # wider net than the base per-source k, but still nowhere near a full
 # document sample (that's what "summary" intent is for).
+
+# --- Summary sampling ---
+SUMMARY_MAX_EXCERPTS_PER_SOURCE = 8
+SUMMARY_MIN_EXCERPT_TOKENS = 250
+# "summary" sends ONE request, and real chunks are ~1000 tokens, so whole
+# chunks would mean under two per document -- not enough to span a paper.
+# Instead each document is sampled at up to SUMMARY_MAX_EXCERPTS_PER_SOURCE
+# evenly spaced positions, and every excerpt is trimmed so they all fit
+# GROQ_MAX_CONTEXT_TOKENS, but to no less than SUMMARY_MIN_EXCERPT_TOKENS
+# (~160 words; shorter excerpts stop carrying a coherent point). With the
+# default 5000-token budget that is up to 20 excerpts per request.
 
 # --- Query expansion ---
 # A short generic instruction ("focus on research gaps") embeds poorly
