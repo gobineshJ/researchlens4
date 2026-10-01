@@ -61,7 +61,8 @@ def add_chunks(collection, chunks: list[dict]) -> None:
     embeddings = embedder.encode(texts).tolist()
     ids = [str(uuid.uuid4()) for _ in chunks]
     metadatas = [
-        {"source_label": c["source_label"], "source_type": c["source_type"], "source_name": c["source_name"]}
+        {"source_label": c["source_label"], "source_type": c["source_type"],
+         "source_name": c["source_name"], "position": c.get("position", 0)}
         for c in chunks
     ]
 
@@ -121,6 +122,7 @@ def _parse_query_results(results: dict) -> list[dict]:
             "source_label": meta["source_label"],
             "source_type": meta["source_type"],
             "source_name": meta["source_name"],
+            "position": meta.get("position"),
             "distance": distance,
         })
     return hits

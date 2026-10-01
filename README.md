@@ -36,8 +36,8 @@ USER
                               ┌─────────────────────────────────────────────┴─────────────────────────────────┐
                               │ intent = "summary"                                    intent = "targeted_qa" / "analysis"
                               ▼                                                                    ▼
-                  Instructions ──► GROQ QUERY EXPANSION                        Instructions ──► GROQ QUERY DECOMPOSITION
-                                    (a few more specific rewordings)                             (splits a COMPOUND instruction into
+                  No query expansion or reranking:                             Instructions ──► GROQ QUERY DECOMPOSITION
+                        there is no topic to rank against                                        (splits a COMPOUND instruction into
                               │                                                                   2-3 independent sub-questions, each
                   PER-SOURCE positional sampling                                                  retrieved separately -- "compositional"
                   (chunker.sample_representative --                                               multi-hop; NOT iterative -- see note below)
@@ -59,9 +59,26 @@ USER
                                                                     (cross-encoder/ms-marco-MiniLM-L-6-v2,
                                                                      scores a short snippet of each candidate
                                                                      against every expanded query, keeps each
-                                                                     candidate's best score, per source)
+                                                                     candidate's best score, per source.
+                                                                     "targeted_qa"/"analysis" ONLY -- a
+                                                                     positional sample has no query to rank
+                                                                     against, and reordering it by relevance
+                                                                     is what let the budget trim drop a
+                                                                     document's opening chunks)
                                                                             │
                                                               FINAL CHUNKS + source metadata
+                                                               trimmed to GROQ_MAX_CONTEXT_TOKENS
+                                                               (for "summary": reference lists, figure
+                                                                captions, affiliations and
+                                                                acknowledgements are excluded first, so
+                                                                "the end of the document" means its last
+                                                                real content; then up to 8 evenly spaced
+                                                                EXCERPTS per document, each trimmed to an
+                                                                equal share of this budget -- breadth over
+                                                                depth, since whole ~1000-token chunks would
+                                                                allow under two per paper. The trim keeps
+                                                                each document's first and last chunk before
+                                                                any interior one as a safety net)
                                                                             │
                                                     GROQ REPORT GENERATION (openai/gpt-oss-120b)
                                                                             │

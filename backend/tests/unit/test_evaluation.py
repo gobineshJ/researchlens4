@@ -202,9 +202,99 @@ def test_span_coverage_checks_each_source_independently():
     evaluation.validate_span_coverage(
         {"wide.pdf": wide, "narrow.pdf": narrow}, retrieved, report
     )
-    results = {c["detail"].split(":")[0]: c["passed"] for c in report.checks}
+    results = {c["subject"]: c["passed"] for c in report.checks if c["name"] == "span_coverage"}
     assert results["wide.pdf"]
     assert not results["narrow.pdf"]
+
+
+def test_span_largest_gap_reports_holes_inside_a_full_span():
+    """Span is a RANGE: two chunks at either end score 100% while leaving the
+    whole middle unrepresented. The gap metric is what exposes that."""
+    report = evaluation.EvaluationReport()
+    source_chunks = [{"text": f"chunk-{i}", "source_name": "doc.pdf", "position": i} for i in range(100)]
+    evaluation.validate_span_coverage(
+        {"doc.pdf": source_chunks}, [source_chunks[0], source_chunks[99]], report
+    )
+    span = next(c for c in report.checks if c["name"] == "span_coverage")
+    gap = next(c for c in report.checks if c["name"] == "span_largest_gap")
+    assert span["value"] == 1.0 and span["passed"]
+    assert gap["value"] == 1.0  # the entire document is one unsampled stretch
+
+
+def test_span_largest_gap_shrinks_as_coverage_fills_in():
+    report = evaluation.EvaluationReport()
+    source_chunks = [{"text": f"chunk-{i}", "source_name": "doc.pdf", "position": i} for i in range(100)]
+    retrieved = [source_chunks[i] for i in (0, 25, 50, 75, 99)]
+    evaluation.validate_span_coverage({"doc.pdf": source_chunks}, retrieved, report)
+    gap = next(c for c in report.checks if c["name"] == "span_largest_gap")
+    assert gap["value"] == round(25 / 99, 3)
+    assert gap["passed"]  # informational -- never gates
+
+
+def test_span_largest_gap_is_not_a_gate():
+    """Deliberately awful coverage: the gap check still passes, because it has
+    no calibrated threshold yet -- span_coverage is the gate."""
+    report = evaluation.EvaluationReport()
+    source_chunks = [{"text": f"chunk-{i}", "source_name": "doc.pdf", "position": i} for i in range(100)]
+    evaluation.validate_span_coverage(
+        {"doc.pdf": source_chunks}, [source_chunks[0], source_chunks[1]], report
+    )
+    assert not next(c for c in report.checks if c["name"] == "span_coverage")["passed"]
+    assert next(c for c in report.checks if c["name"] == "span_largest_gap")["passed"]
+
+
+def test_span_coverage_reads_the_explicit_position_field():
+    report = evaluation.EvaluationReport()
+    source_chunks = [{"text": f"chunk-{i}", "source_name": "doc.pdf", "position": i} for i in range(100)]
+    retrieved = [source_chunks[i] for i in (0, 50, 99)]
+    evaluation.validate_span_coverage({"doc.pdf": source_chunks}, retrieved, report)
+    assert report.checks[0]["passed"]
+    assert report.checks[0]["value"] == 1.0
+
+
+def test_span_coverage_scores_duplicate_text_by_position_not_text():
+    """Overlapping chunks and repeated boilerplate can produce two chunks with
+    identical text. The old text-to-index map collapsed those to one position,
+    so a selection spanning the document could be scored as if it did not."""
+    report = evaluation.EvaluationReport()
+    source_chunks = [{"text": "boilerplate", "source_name": "doc.pdf", "position": i} for i in range(100)]
+    retrieved = [source_chunks[0], source_chunks[99]]
+    evaluation.validate_span_coverage({"doc.pdf": source_chunks}, retrieved, report)
+    assert report.checks[0]["passed"]
+    assert report.checks[0]["value"] == 1.0
+
+
+def test_span_coverage_falls_back_to_text_matching_without_positions():
+    report = evaluation.EvaluationReport()
+    source_chunks = _source_chunks(100)  # no "position" key
+    retrieved = [source_chunks[i] for i in (0, 2, 4, 6, 8)]
+    evaluation.validate_span_coverage({"doc.pdf": source_chunks}, retrieved, report)
+    assert not report.checks[0]["passed"]
+
+
+def test_span_coverage_ignores_holes_left_by_excluded_back_matter():
+    """A Nature paper's Methods follow its reference list. With references
+    removed, positions jump (12 -> 18); that skipped stretch is back matter
+    the sampler was right to leave out, not unsampled content."""
+    report = evaluation.EvaluationReport()
+    content = [{"text": f"c{p}", "source_name": "doc.pdf", "position": p}
+               for p in list(range(0, 13)) + list(range(18, 23))]
+    retrieved = [content[0], content[12], content[-1]]  # positions 0, 18, 22
+    evaluation.validate_span_coverage({"doc.pdf": content}, retrieved, report)
+    span = next(c for c in report.checks if c["name"] == "span_coverage")
+    gap = next(c for c in report.checks if c["name"] == "span_largest_gap")
+    assert span["value"] == 1.0
+    assert gap["value"] == round(12 / 17, 3)  # 12 content steps, not 18 raw positions
+
+
+def test_span_largest_gap_counts_the_unsampled_ends():
+    """One chunk in the middle leaves both halves unread -- the gap must say so
+    rather than report zero."""
+    report = evaluation.EvaluationReport()
+    content = [{"text": f"c{i}", "source_name": "doc.pdf", "position": i} for i in range(11)]
+    evaluation.validate_span_coverage({"doc.pdf": content}, [content[5]], report)
+    gap = next(c for c in report.checks if c["name"] == "span_largest_gap")
+    assert gap["value"] == 0.5
 
 
 # ---------- Generation / groundedness ----------

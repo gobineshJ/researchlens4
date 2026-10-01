@@ -25,9 +25,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import chunker
 from .config import (
-    CHUNK_SIZE_TOKENS, CHUNK_OVERLAP_RATIO, CRAWL_MAX_DEPTH, CRAWL_SAME_DOMAIN_ONLY,
+    CHUNK_SIZE_WORDS, CHUNK_OVERLAP_RATIO, CRAWL_MAX_DEPTH, CRAWL_SAME_DOMAIN_ONLY,
     RERANK_SCORE_WARNING_THRESHOLD, EVALUATION_LOG_PATH, GROUNDEDNESS_THRESHOLD,
+    GROQ_MAX_CONTEXT_TOKENS,
 )
 
 
@@ -37,14 +39,21 @@ class EvaluationReport:
         self.stage_durations: dict[str, float] = {}
         self.errors: list[str] = []
 
-    def add_check(self, stage: str, name: str, passed: bool, detail: str, value: float | None = None):
+    def add_check(self, stage: str, name: str, passed: bool, detail: str, value: float | None = None,
+                  subject: str | None = None):
         """
         `value` is the actual number the check was judged against (e.g.
         average rerank score, groundedness percentage) when there is one --
         stored separately from `detail` so runs can be compared numerically
         instead of by re-parsing sentences.
+
+        `subject` names WHAT this check was run against when one check runs
+        several times per run -- span_coverage emits one row per uploaded
+        document, and without this the panel shows three rows all reading
+        "span_coverage", distinguishable only by reading the prose.
         """
-        self.checks.append({"stage": stage, "name": name, "passed": passed, "detail": detail, "value": value})
+        self.checks.append({"stage": stage, "name": name, "passed": passed, "detail": detail,
+                            "value": value, "subject": subject})
 
     def record_error(self, stage: str, message: str):
         self.errors.append(f"[{stage}] {message}")
@@ -107,17 +116,25 @@ def validate_chunking(chunks: list[dict], report: EvaluationReport):
         return
 
     sizes = [len(c["text"].split()) for c in chunks]
-    oversized = [s for s in sizes if s > CHUNK_SIZE_TOKENS * 1.1]
+    oversized = [s for s in sizes if s > CHUNK_SIZE_WORDS * 1.1]
+    # Stated in budget tokens too, because the two units are ~1.5x apart and
+    # the chunk count the budget can actually hold is the number that
+    # determines how much of a document a summary gets to see.
+    max_tokens_per_chunk = max(chunker.estimate_tokens(c["text"]) for c in chunks)
     report.add_check(
         stage, "size", len(oversized) == 0,
-        f"{len(oversized)} of {len(chunks)} chunk(s) exceeded ~{CHUNK_SIZE_TOKENS} tokens.",
+        f"{len(oversized)} of {len(chunks)} chunk(s) exceeded ~{CHUNK_SIZE_WORDS} words. "
+        f"Largest is ~{max_tokens_per_chunk} tokens, so the "
+        f"{GROQ_MAX_CONTEXT_TOKENS}-token generation budget holds roughly "
+        f"{max(1, GROQ_MAX_CONTEXT_TOKENS // max_tokens_per_chunk)} of them at once "
+        f"(CHUNK_SIZE_WORDS counts WORDS; the budget counts tokens).",
     )
 
-    expected_step = max(1, int(CHUNK_SIZE_TOKENS * (1 - CHUNK_OVERLAP_RATIO)))
-    overlap_applied = expected_step < CHUNK_SIZE_TOKENS
+    expected_step = max(1, int(CHUNK_SIZE_WORDS * (1 - CHUNK_OVERLAP_RATIO)))
+    overlap_applied = expected_step < CHUNK_SIZE_WORDS
     report.add_check(
         stage, "overlap", overlap_applied,
-        f"Configured overlap ratio {CHUNK_OVERLAP_RATIO:.0%}, step size {expected_step} tokens.",
+        f"Configured overlap ratio {CHUNK_OVERLAP_RATIO:.0%}, step size {expected_step} words.",
     )
 
 
@@ -207,6 +224,16 @@ def validate_retrieval_confidence(retrieved_chunks: list[dict], report: Evaluati
 
     distances = [c["distance"] for c in retrieved_chunks if "distance" in c]
     if not distances:
+        # "summary" intent selects by position and runs neither similarity
+        # search nor the cross-encoder, so there is no relevance score to
+        # report. Say that explicitly rather than silently omitting the row,
+        # which reads like the check failed to run.
+        report.add_check(
+            stage, "confidence", True,
+            f"No relevance score applies: all {len(retrieved_chunks)} chunk(s) were selected "
+            f"by position across each document, not by matching a query. See span_coverage "
+            f"for whether that selection actually covered the documents.",
+        )
         return
     avg_distance = sum(distances) / len(distances)
     weak_matches = [d for d in distances if d > RETRIEVAL_DISTANCE_WARNING_THRESHOLD]
@@ -228,37 +255,81 @@ def validate_span_coverage(chunks_by_source: dict[str, list[dict]], retrieved_ch
     Only meaningful for "summary" intent, where selection is supposed to
     be POSITIONAL (chunker.sample_representative), not similarity-based.
     Confirms the selected chunks actually span a wide range of each
-    document's position, rather than clustering near the start (or
-    anywhere else) -- which would defeat the point of positional
-    sampling and silently degrade back into a narrow, unrepresentative
-    summary.
+    document, rather than clustering near the start (or anywhere else) --
+    which would defeat the point of positional sampling and silently
+    degrade back into a narrow, unrepresentative summary.
 
-    `chunks_by_source` must be each source's chunks in their ORIGINAL
-    reading order (the same order sample_representative was given), so
-    position lookups are meaningful.
+    `chunks_by_source` is, per source, the chunks selection was made FROM,
+    in reading order. For "summary" that is each document's content with
+    its back matter removed (chunker.content_chunks), so coverage is judged
+    against the text that can actually be summarized -- a selection
+    reaching a paper's reference list is not better coverage.
+
+    Span and gap are measured in steps through that list, not in raw
+    positions: with back matter removed, raw positions have holes in them
+    (a Nature paper's Methods follow its references), and a hole the
+    sampler was right to skip must not count as unsampled text.
+
+    Positions come from each chunk's "position" field (chunker.chunk_all).
+    Chunks without one fall back to their index in the list, matched on
+    text -- only approximate, since identical texts collapse to one entry.
     """
     stage = "retrieval"
     for name, source_chunks in chunks_by_source.items():
         if len(source_chunks) <= 1:
             continue  # nothing to spread across
 
-        text_to_position = {c["text"]: i for i, c in enumerate(source_chunks)}
-        positions = [
-            text_to_position[c["text"]] for c in retrieved_chunks
-            if c.get("source_name") == name and c["text"] in text_to_position
-        ]
-        if not positions:
+        def position_of(chunk: dict, fallback: int | None) -> int | None:
+            position = chunk.get("position")
+            return position if isinstance(position, int) else fallback
+
+        available = [position_of(c, i) for i, c in enumerate(source_chunks)]
+        step_of = {position: step for step, position in enumerate(sorted(set(available)))}
+        text_to_position = {c["text"]: p for c, p in zip(source_chunks, available)}
+
+        selected = sorted({
+            p for c in retrieved_chunks if c.get("source_name") == name
+            for p in [position_of(c, text_to_position.get(c["text"]))]
+            if p in step_of
+        })
+        if not selected:
             continue
 
-        full_span = len(source_chunks) - 1
-        span_fraction = (max(positions) - min(positions)) / full_span
-        covers_everything_available = len(positions) >= len(source_chunks) - 1
+        steps = [step_of[p] for p in selected]
+        full_span = len(step_of) - 1
+        span_fraction = (steps[-1] - steps[0]) / full_span
+        covers_everything_available = len(steps) >= len(step_of) - 1
         passed = span_fraction >= 0.5 or covers_everything_available
+
+        # Span alone is a RANGE, so the first and last chunk of a 100-chunk
+        # document score 100% with everything between them unread. The
+        # largest gap says how much went unrepresented in one stretch,
+        # including before the first and after the last selected chunk --
+        # informational, deliberately not a gate: it needs real runs before
+        # a threshold would mean anything.
+        boundaries = [0] + steps + [full_span]
+        largest_gap = max(b - a for a, b in zip(boundaries, boundaries[1:]))
+        gap_fraction = largest_gap / full_span
+
+        content_note = (f" (its {len(step_of)} content chunks run from position "
+                        f"{min(step_of)} to {max(step_of)})"
+                        if len(step_of) != max(step_of) - min(step_of) + 1
+                        else f" (positions {min(step_of)}-{max(step_of)})")
         report.add_check(
             stage, "span_coverage", passed,
-            f"{name}: selected chunks span {span_fraction:.0%} of the document's position "
-            f"range (positions {min(positions)}-{max(positions)} of 0-{full_span}).",
+            f"Selected chunks span {span_fraction:.0%} of the document's content, from "
+            f"position {selected[0]} to {selected[-1]}{content_note}.",
             value=round(span_fraction, 3),
+            subject=name,
+        )
+        report.add_check(
+            stage, "span_largest_gap", True,
+            f"Widest unsampled stretch is {largest_gap} of {full_span} step(s) through the "
+            f"content, {gap_fraction:.0%} of it, with {len(selected)} chunk(s) selected "
+            f"(informational only -- span coverage measures the range, this measures the "
+            f"holes inside it).",
+            value=round(gap_fraction, 3),
+            subject=name,
         )
 
 
@@ -412,7 +483,11 @@ def validate_pdf_encoding_safety(sanitized_report_text: str, sanitized_citations
 # actual /process response.
 
 def append_run_to_log(report: "EvaluationReport", run_id: str | None = None,
-                       instructions: str = "", log_path: str = EVALUATION_LOG_PATH) -> None:
+                       instructions: str = "", log_path: str | None = None) -> None:
+    # Resolved at call time, not as a default argument: a default is fixed
+    # when the module loads, so tests could not redirect it -- and every
+    # test run wrote into the real Run history.
+    log_path = log_path or EVALUATION_LOG_PATH
     run_id = run_id or uuid.uuid4().hex[:12]
     summary = report.to_dict()
     entry = {
@@ -435,14 +510,14 @@ def append_run_to_log(report: "EvaluationReport", run_id: str | None = None,
         pass  # logging must never break the actual response
 
 
-def read_run_history(log_path: str = EVALUATION_LOG_PATH, limit: int = 50) -> list[dict]:
+def read_run_history(log_path: str | None = None, limit: int = 50) -> list[dict]:
     """
     Reads the evaluation log back out, newest first, for comparison
     across runs. Returns [] if the log doesn't exist yet (first run
     hasn't happened) rather than raising -- an empty history is a
     normal, expected state, not an error.
     """
-    path = Path(log_path)
+    path = Path(log_path or EVALUATION_LOG_PATH)
     if not path.exists():
         return []
 

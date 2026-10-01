@@ -20,7 +20,12 @@ import json
 import time
 import requests
 
-from .config import GROQ_API_KEY, GROQ_FILTER_MODEL, GROQ_GENERATION_MODEL, QUERY_EXPANSION_VARIANTS
+from . import chunker
+
+from .config import (
+    GROQ_API_KEY, GROQ_FILTER_MODEL, GROQ_GENERATION_MODEL, GROQ_MAX_CONTEXT_TOKENS,
+    QUERY_EXPANSION_VARIANTS,
+)
 
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 MAX_RETRIES = 3
@@ -62,6 +67,15 @@ def _call_groq(model: str, system_prompt: str, user_prompt: str, json_mode: bool
                 json=payload,
                 timeout=30,
             )
+            if response.status_code == 413:
+                # Groq's own message says which limit was hit (e.g. "Request
+                # too large ... on tokens per minute (TPM): Limit 8000,
+                # Requested 11234") -- surface it instead of a bare HTTPError.
+                raise RuntimeError(
+                    f"Groq rejected the request as too large for model '{model}'. "
+                    f"Lower GROQ_MAX_CONTEXT_TOKENS in backend/.env or use fewer/smaller "
+                    f"sources. Groq said: {response.text}"
+                )
             response.raise_for_status()
             return response.json()["choices"][0]["message"]["content"]
 
@@ -279,6 +293,126 @@ def classify_intent(instructions: str) -> str:
         return intent if intent in ("summary", "targeted_qa", "analysis") else "targeted_qa"
     except Exception:
         return "targeted_qa"
+
+
+# Lives in chunker now, so the summary sampler can size its own output
+# against this same budget (chunker.plan_summary_excerpts). Kept bound here
+# under the original name because callers and tests reference it.
+_estimate_tokens = chunker.estimate_tokens
+
+
+def _endpoint_first_order(indices: list[int], chunks: list[dict]) -> list[int]:
+    """
+    Reorders one source's chunk indices so that taking ANY prefix of the
+    result gives the widest-spread subset of that size: first the lowest
+    and highest document positions, then repeatedly whichever remaining
+    chunk sits nearest the middle of the widest gap left behind.
+
+    This is what makes budget trimming safe for "summary" intent. The
+    trim keeps a prefix of each source's queue and discards the tail, so
+    with the default relevance ordering the chunks it discards are
+    position-blind -- a document's opening chunks can rank lowest on the
+    cross-encoder and get dropped, collapsing the positional span that
+    summary retrieval exists to produce. Ordering endpoints first makes
+    that outcome structurally impossible at any trim depth.
+
+    Chunks without a "position" keep their given order (nothing to spread
+    across), so this degrades to the default behaviour.
+    """
+    positioned = [i for i in indices if isinstance(chunks[i].get("position"), int)]
+    if len(positioned) < 2:
+        return list(indices)
+    unpositioned = [i for i in indices if i not in set(positioned)]
+
+    remaining = sorted(positioned, key=lambda i: chunks[i]["position"])
+    order = [remaining.pop(0), remaining.pop()]
+    while remaining:
+        # Pick the chunk that best splits the widest gap among the ones
+        # already chosen -- classic farthest-point sampling.
+        chosen = sorted(chunks[i]["position"] for i in order)
+        best = max(
+            remaining,
+            key=lambda i: min(abs(chunks[i]["position"] - p) for p in chosen),
+        )
+        order.append(best)
+        remaining.remove(best)
+    return order + unpositioned
+
+
+def fit_chunks_to_budget(chunks: list[dict], max_tokens: int = GROQ_MAX_CONTEXT_TOKENS,
+                          preserve_span: bool = False) -> list[dict]:
+    """
+    Trims `chunks` so their combined text fits in `max_tokens`, so the
+    generation request stays under Groq's per-request size limit (see
+    GROQ_MAX_CONTEXT_TOKENS in config.py).
+
+    Chunks are taken round-robin across sources (each source's list in
+    its existing ranked order), so trimming drops the lowest-ranked chunks
+    of EVERY source evenly rather than silently cutting whole documents
+    off the end. The kept chunks are returned in their original order.
+    Always keeps at least one chunk, truncating its text if it alone is
+    over budget.
+
+    preserve_span: consider each source's chunks for keeping in
+        endpoint-first order instead of their given (relevance) order, so
+        trimming can never collapse a document's positional span. Set this
+        for "summary" intent, where selection is positional and relevance
+        rank is the wrong thing to trim by. Only the ORDER OF
+        CONSIDERATION changes -- the returned list is still in input
+        order, so the generation prompt sees chunks as it did before.
+    """
+    if not chunks:
+        return []
+
+    by_source: dict[str, list[int]] = {}
+    for i, c in enumerate(chunks):
+        by_source.setdefault(c.get("source_name", ""), []).append(i)
+
+    if preserve_span:
+        by_source = {
+            name: _endpoint_first_order(indices, chunks)
+            for name, indices in by_source.items()
+        }
+
+    kept: set[int] = set()
+    used = 0
+    queues = list(by_source.values())
+
+    if preserve_span:
+        # Two round-robin passes first -- every document's lowest position,
+        # then every document's highest -- so the available room buys full
+        # spans for as many documents as it can before any interior chunk
+        # is considered. Interiors are then filled document by document
+        # rather than round-robin: once endpoints are secured, the room
+        # that is left is better spent deepening coverage than scattering
+        # single chunks. Pass 1 alone already guarantees every document
+        # keeps representation (source_coverage).
+        order = []
+        for _ in range(2):
+            order += [queue.pop(0) for queue in queues if queue]
+        order += [i for queue in queues for i in queue]
+        for i in order:
+            cost = _estimate_tokens(chunks[i]["text"])
+            if used + cost <= max_tokens:
+                kept.add(i)
+                used += cost
+    else:
+        while any(queues):
+            for queue in queues:
+                if not queue:
+                    continue
+                i = queue.pop(0)
+                cost = _estimate_tokens(chunks[i]["text"])
+                if used + cost <= max_tokens:
+                    kept.add(i)
+                    used += cost
+            # Keep cycling -- a later, shorter chunk may still fit after a
+            # longer one didn't.
+
+    if not kept:
+        first = chunks[0]
+        return [{**first, "text": first["text"][: max_tokens * 4]}]
+    return [c for i, c in enumerate(chunks) if i in kept]
 
 
 def generate_report(chunks: list[dict], instructions: str) -> dict:
