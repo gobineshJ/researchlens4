@@ -8,6 +8,7 @@ backend/**/__pycache__/
 backend/.env
 backend/chroma_store/
 backend/evaluation_log.jsonl
+backend/figure_cache.json
 backend/generated_reports/
 backend/.pytest_cache/
 backend/**/.pytest_cache/
@@ -26,3 +27,7 @@ Thumbs.db
 # --- Env files anywhere ---
 .env
 *.env.local
+
+# --- Auth DB + queued uploads ---
+backend/researchlens.db
+backend/job_uploads/

@@ -38,7 +38,12 @@ def chunk_record(record: dict,
                   overlap_ratio: float = CHUNK_OVERLAP_RATIO) -> list[dict]:
     """
     Splits one record's text into word-bounded chunks. Returns a list of:
-        {"text": ..., "source_label": ..., "source_type": ..., "source_name": ...}
+        {"text": ..., "source_label": ..., "source_type": ..., "source_name": ...,
+         "content_type": ...}
+
+    content_type is "text" unless the record says otherwise -- doc_parser
+    marks figure records, so evaluation can tell model-generated figure
+    descriptions apart from text taken verbatim from a source.
     """
     words = record["text"].split()
     if not words:
@@ -47,6 +52,7 @@ def chunk_record(record: dict,
     step = max(1, int(chunk_size * (1 - overlap_ratio)))
     label = _label_for(record)
     source_name = _source_name_for(record)
+    content_type = record.get("content_type", "text")
 
     chunks = []
     start = 0
@@ -57,6 +63,7 @@ def chunk_record(record: dict,
             "source_label": label,
             "source_type": record["source_type"],
             "source_name": source_name,
+            "content_type": content_type,
         })
         if start + chunk_size >= len(words):
             break

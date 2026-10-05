@@ -62,7 +62,8 @@ def add_chunks(collection, chunks: list[dict]) -> None:
     ids = [str(uuid.uuid4()) for _ in chunks]
     metadatas = [
         {"source_label": c["source_label"], "source_type": c["source_type"],
-         "source_name": c["source_name"], "position": c.get("position", 0)}
+         "source_name": c["source_name"], "position": c.get("position", 0),
+         "content_type": c.get("content_type", "text")}
         for c in chunks
     ]
 
@@ -123,6 +124,7 @@ def _parse_query_results(results: dict) -> list[dict]:
             "source_type": meta["source_type"],
             "source_name": meta["source_name"],
             "position": meta.get("position"),
+            "content_type": meta.get("content_type", "text"),
             "distance": distance,
         })
     return hits

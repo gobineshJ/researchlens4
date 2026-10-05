@@ -11,3 +11,6 @@ sentence-transformers
 chromadb
 rank-bm25
 reportlab
+celery[redis]
+pyjwt
+bcrypt

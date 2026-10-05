@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import chunker
+from . import chunker, progress
 from .config import (
     CHUNK_SIZE_WORDS, CHUNK_OVERLAP_RATIO, CRAWL_MAX_DEPTH, CRAWL_SAME_DOMAIN_ONLY,
     RERANK_SCORE_WARNING_THRESHOLD, EVALUATION_LOG_PATH, GROUNDEDNESS_THRESHOLD,
@@ -60,6 +60,7 @@ class EvaluationReport:
 
     @contextmanager
     def timed_stage(self, stage_name: str):
+        progress.stage(stage_name)
         start = time.perf_counter()
         try:
             yield
@@ -105,6 +106,20 @@ def validate_extraction(records: list[dict], report: EvaluationReport):
         stage, "metadata", len(missing_metadata) == 0,
         f"{len(missing_metadata)} of {len(records)} record(s) missing required metadata.",
     )
+
+    # Only when the documents had figures at all -- a run on text-only
+    # sources gets no row rather than a vacuous "0 of 0" pass.
+    figures = [r for r in records if r.get("content_type", "").startswith("figure")]
+    if figures:
+        described = sum(1 for r in figures if r["content_type"] == "figure_description")
+        report.add_check(
+            stage, "figure_descriptions", described == len(figures),
+            f"{described} of {len(figures)} figure(s) described by the vision model"
+            + ("." if described == len(figures) else
+               f"; {len(figures) - described} kept as caption-only (no API key, request "
+               f"failure, or over the per-document limit)."),
+            value=round(100 * described / len(figures), 1),
+        )
 
 
 # ---------- Chunking ----------
@@ -446,6 +461,22 @@ def validate_generation(report_text: str, citations_used: list[str], retrieved_c
             f"(threshold {GROUNDEDNESS_THRESHOLD:.0%})." +
             ("" if grounded else " Low overlap suggests possible drift from source content."),
             value=round(overlap * 100, 1),
+        )
+
+    # Groundedness above is measured against chunk TEXT, and for a figure
+    # that text is the vision model's description -- a chart value the model
+    # misread still counts as grounded. Informational, not pass/fail: it
+    # says how much of the report rests on evidence nobody transcribed by hand.
+    generated_labels = {c["source_label"] for c in retrieved_chunks
+                        if c.get("content_type") == "figure_description"}
+    figure_citations = [label for label in citations_used if label in generated_labels]
+    if figure_citations:
+        report.add_check(
+            stage, "figure_citations", True,
+            f"{len(figure_citations)} of {len(citations_used)} cited source(s) are model-generated "
+            f"figure descriptions ({', '.join(figure_citations)}); groundedness for these is "
+            f"checked against the description, not the figure itself.",
+            value=len(figure_citations),
         )
 
 
