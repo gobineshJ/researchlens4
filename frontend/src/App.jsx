@@ -1,15 +1,67 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { apiFetch, downloadFile, getToken, setToken, setUnauthorizedHandler } from "./api.js";
+import LoginScreen from "./LoginScreen.jsx";
 
-// Backend URL — change this if you run FastAPI on a different port/host.
-const API_BASE = "http://127.0.0.1:8000";
+const POLL_INTERVAL_MS = 2000;
+
+// Pipeline stage names (as the backend reports them) -> what the user sees.
+const STAGE_LABELS = {
+  extraction: "Reading your documents",
+  crawl_discovery: "Discovering pages from the reference URLs",
+  relevance_filter: "Checking which pages are relevant",
+  scraping: "Scraping the relevant pages",
+  chunking: "Splitting text into chunks",
+  embedding_and_storage: "Embedding and indexing chunks",
+  retrieval: "Finding the most relevant passages",
+  generation: "Writing the report",
+  self_correction_retry: "Report was weakly grounded — retrying with new searches",
+  pdf_export: "Exporting the PDF",
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export default function App() {
+  // undefined = still checking a saved token, null = logged out
+  const [username, setUsername] = useState(getToken() ? undefined : null);
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => setUsername(null));
+    if (!getToken()) return;
+    apiFetch("/auth/me")
+      .then((response) => response.json())
+      .then((me) => setUsername(me.username))
+      .catch(() => {
+        setToken(null);
+        setUsername(null);
+      });
+  }, []);
+
+  function logout() {
+    setToken(null);
+    setUsername(null);
+  }
+
+  if (username === undefined) return null;
+  if (username === null) return <LoginScreen onLoggedIn={setUsername} />;
+  return <Workspace username={username} onLogout={logout} />;
+}
+
+function Workspace({ username, onLogout }) {
   const [files, setFiles] = useState([]);
   const [seedUrls, setSeedUrls] = useState("");
   const [instructions, setInstructions] = useState("");
   const [status, setStatus] = useState("idle"); // idle | running | done | error
   const [errorMessage, setErrorMessage] = useState("");
   const [result, setResult] = useState(null);
+  const [jobStatus, setJobStatus] = useState(""); // queued | running, while a job is in flight
+  const [progress, setProgress] = useState(null); // {stage, detail} from the worker
+
+  // Stops the polling loop if the user logs out mid-run.
+  const unmounted = useRef(false);
+  useEffect(() => {
+    unmounted.current = false;
+    return () => { unmounted.current = true; };
+  }, []);
 
   async function handleProcess() {
     if (files.length === 0 && !seedUrls.trim()) {
@@ -19,6 +71,7 @@ export default function App() {
     setStatus("running");
     setErrorMessage("");
     setResult(null);
+    setProgress(null);
 
     const formData = new FormData();
     files.forEach((file) => formData.append("files", file));
@@ -26,20 +79,26 @@ export default function App() {
     formData.append("instructions", instructions);
 
     try {
-      const response = await fetch(`${API_BASE}/process`, {
-        method: "POST",
-        body: formData,
-      });
+      // /process only enqueues the run on a Celery worker; the report
+      // itself arrives by polling /jobs/{job_id} until it's finished.
+      const response = await apiFetch("/process", { method: "POST", body: formData });
+      const { job_id } = await response.json();
+      setJobStatus("queued");
 
-      if (!response.ok) {
-        const errorBody = await response.json().catch(() => ({}));
-        throw new Error(errorBody.detail || `Request failed (${response.status})`);
+      while (!unmounted.current) {
+        const job = await (await apiFetch(`/jobs/${job_id}`)).json();
+        if (job.status === "done") {
+          setResult(job.result);
+          setStatus("done");
+          return;
+        }
+        if (job.status === "error") throw new Error(job.error || "The pipeline failed.");
+        setJobStatus(job.status);
+        setProgress(job.progress || null);
+        await sleep(POLL_INTERVAL_MS);
       }
-
-      const data = await response.json();
-      setResult(data);
-      setStatus("done");
     } catch (err) {
+      if (unmounted.current) return;
       setErrorMessage(err.message || "Something went wrong.");
       setStatus("error");
     }
@@ -47,7 +106,13 @@ export default function App() {
 
   return (
     <div style={styles.page}>
-      <h1>ResearchLens</h1>
+      <div style={styles.header}>
+        <h1 style={{ margin: 0 }}>ResearchLens</h1>
+        <div style={styles.userBox}>
+          <span>{username}</span>
+          <button style={styles.smallButton} onClick={onLogout}>Log out</button>
+        </div>
+      </div>
       <p style={styles.subtitle}>
         RAG research paper summarizer — upload documents, give seed URLs, describe the report you want.
       </p>
@@ -87,20 +152,31 @@ export default function App() {
       </section>
 
       {status === "running" && (
-        <p style={styles.statusText}>
-          Running the pipeline — crawling, filtering, embedding, and generating the report.
-          This can take a minute or two depending on how many pages and files you gave it.
-        </p>
+        <div style={styles.progressBox}>
+          {jobStatus === "queued" ? (
+            <strong>Queued — waiting for a worker to pick up the job.</strong>
+          ) : progress?.stage ? (
+            <>
+              <strong>{STAGE_LABELS[progress.stage] || progress.stage}…</strong>
+              {progress.detail && <div style={styles.progressDetail}>{progress.detail}</div>}
+            </>
+          ) : (
+            <strong>Running the pipeline…</strong>
+          )}
+          <p style={styles.statusText}>
+            This can take a few minutes depending on how many pages, files and figures you gave it.
+          </p>
+        </div>
       )}
 
-      {result && <ResultsPanel result={result} apiBase={API_BASE} />}
+      {result && <ResultsPanel result={result} />}
 
-      <HistoryPanel apiBase={API_BASE} />
+      <HistoryPanel />
     </div>
   );
 }
 
-function HistoryPanel({ apiBase }) {
+function HistoryPanel() {
   const [runs, setRuns] = useState(null);
   const [visible, setVisible] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -108,7 +184,7 @@ function HistoryPanel({ apiBase }) {
   async function loadHistory() {
     setLoading(true);
     try {
-      const response = await fetch(`${apiBase}/evaluation-history?limit=20`);
+      const response = await apiFetch("/evaluation-history?limit=20");
       const data = await response.json();
       setRuns(data.runs || []);
     } catch {
@@ -191,7 +267,18 @@ function HistoryPanel({ apiBase }) {
   );
 }
 
-function ResultsPanel({ result, apiBase }) {
+function ResultsPanel({ result }) {
+  const [downloadError, setDownloadError] = useState("");
+
+  async function handleDownload() {
+    setDownloadError("");
+    try {
+      await downloadFile(`/download/${result.pdf_filename}`, result.pdf_filename);
+    } catch (err) {
+      setDownloadError(err.message || "Download failed.");
+    }
+  }
+
   return (
     <section style={styles.card}>
       <h2>Results</h2>
@@ -221,13 +308,11 @@ function ResultsPanel({ result, apiBase }) {
       )}
 
       {result.pdf_filename && (
-        <a
-          style={styles.downloadLink}
-          href={`${apiBase}/download/${result.pdf_filename}`}
-        >
+        <button style={styles.downloadLink} onClick={handleDownload}>
           Download PDF report
-        </a>
+        </button>
       )}
+      {downloadError && <p style={styles.error}>{downloadError}</p>}
 
       <EvaluationPanel evaluation={result.evaluation} />
     </section>
@@ -304,6 +389,8 @@ const styles = {
     padding: "2rem 1rem",
     fontFamily: "system-ui, sans-serif",
   },
+  header: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem" },
+  userBox: { display: "flex", alignItems: "center", gap: "0.6rem", color: "#555" },
   subtitle: { color: "#555", marginBottom: "1.5rem" },
   card: {
     border: "1px solid #ddd",
@@ -322,6 +409,8 @@ const styles = {
   smallButton: { padding: "0.4rem 0.9rem", fontSize: "0.9rem", cursor: "pointer" },
   error: { color: "#b02a2a", marginTop: "0.8rem" },
   statusText: { color: "#555", fontStyle: "italic" },
+  progressBox: { border: "1px solid #ddd", borderRadius: 8, padding: "1rem 1.5rem", marginBottom: "1.5rem" },
+  progressDetail: { color: "#555", marginTop: "0.3rem", fontSize: "0.9rem" },
   summaryRow: {
     display: "flex",
     justifyContent: "space-between",
@@ -338,6 +427,9 @@ const styles = {
     color: "#fff",
     borderRadius: 6,
     textDecoration: "none",
+    border: "none",
+    fontSize: "1rem",
+    cursor: "pointer",
   },
   evalBox: { marginTop: "1.5rem", paddingTop: "1rem", borderTop: "1px solid #eee" },
   table: { width: "100%", borderCollapse: "collapse", marginTop: "0.5rem" },

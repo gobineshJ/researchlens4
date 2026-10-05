@@ -26,6 +26,26 @@ GROQ_MAX_CONTEXT_TOKENS = int(os.getenv("GROQ_MAX_CONTEXT_TOKENS", "5000"))
 # 5-8 chunks PER SOURCE at ~650 tokens each, so without a cap a handful of
 # documents blows straight past that limit. Raise this on a paid tier.
 
+# --- Figure captioning (multimodal) ---
+# Figures in uploaded PDFs are rendered to PNG, described by a vision model,
+# and injected as ordinary text records ("paper.pdf, page 7, Figure 3"), so
+# the rest of the pipeline treats them exactly like any other chunk.
+GROQ_VISION_MODEL = "qwen/qwen3.8-27b"
+# Groq's only vision model as of 2026-10 (max 3 images / 20MB per request).
+# Same caveat as the models above: check console.groq.com/docs/vision on a 404.
+FIGURE_CAPTIONING_ENABLED = os.getenv("FIGURE_CAPTIONING_ENABLED", "true").lower() in ("1", "true", "yes")
+FIGURE_RENDER_DPI = 150
+# High enough for axis labels and legend text to stay legible to the model,
+# low enough that a full-width figure stays well under a megabyte of PNG.
+FIGURE_MAX_PER_DOCUMENT = 30
+# Each described figure is one Groq request at extraction time. Past this
+# many, a document's remaining figures are kept as caption-only records
+# rather than risking the free tier's per-minute request limit.
+FIGURE_CACHE_PATH = os.getenv("FIGURE_CACHE_PATH", "./figure_cache.json")
+# Descriptions keyed by a hash of the rendered image. Every /process run
+# builds a fresh collection from scratch, so without this the same paper's
+# figures would be re-described (and re-billed) on every run.
+
 # --- Crawl / discovery ---
 CRAWL_MAX_DEPTH = 2
 CRAWL_MAX_PAGES = 15
@@ -134,3 +154,28 @@ OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./generated_reports")
 # growing history instead of screenshots and memory -- see
 # evaluation.append_run_to_log().
 EVALUATION_LOG_PATH = os.getenv("EVALUATION_LOG_PATH", "./evaluation_log.jsonl")
+
+# --- Authentication (OAuth2 password flow + JWT bearer tokens) ---
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "")
+# Signs every access token. Set this in .env -- when it's empty a random
+# key is generated at startup (see auth.py), which works but logs every
+# user out whenever the API restarts.
+JWT_ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+AUTH_DB_PATH = os.getenv("AUTH_DB_PATH", "./researchlens.db")
+# SQLite file holding user accounts and which user submitted which job.
+ALLOW_REGISTRATION = os.getenv("ALLOW_REGISTRATION", "true").lower() in ("1", "true", "yes")
+# Whether the login screen's "Create account" option works. Turn it off
+# once your accounts exist; `python -m app.create_user` still works.
+
+# --- Celery (background pipeline runs) ---
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
+CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER", "false").lower() in ("1", "true", "yes")
+# true = run the pipeline inside the API process instead of on a worker,
+# so the app still works without Redis or a worker running. /process then
+# blocks until the report is done, exactly like before Celery was added.
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./job_uploads")
+# Uploaded files wait here until a worker picks the job up -- a temp dir
+# deleted at the end of the request (the old approach) would be gone by
+# then. The API and the worker must both be able to read this path.

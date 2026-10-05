@@ -10,40 +10,196 @@ Three jobs:
                               isn't stuck matching against one narrow phrasing.
   generate_report()       -- Day 3: turn retrieved chunks into a grounded,
                               citation-aware report.
+  describe_figure()       -- turn a rendered PDF figure into a text
+                              description that can be chunked like any text.
 
 Both raise GroqNotConfigured with a clear message if no API key is set,
 rather than failing with a confusing HTTP error -- the pipeline can catch
 this and tell the user exactly what's missing.
 """
 
+import base64
 import json
+import re
+import threading
 import time
 import requests
 
-from . import chunker
+from . import chunker, progress
 
 from .config import (
     GROQ_API_KEY, GROQ_FILTER_MODEL, GROQ_GENERATION_MODEL, GROQ_MAX_CONTEXT_TOKENS,
-    QUERY_EXPANSION_VARIANTS,
+    GROQ_VISION_MODEL, QUERY_EXPANSION_VARIANTS,
 )
 
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2  # doubles each retry: 2s, 4s, 8s
+MAX_RATE_LIMIT_WAITS = 6       # 429 retries per request, separate from MAX_RETRIES
+MAX_RATE_LIMIT_WAIT_SECONDS = 60
 
 
 class GroqNotConfigured(Exception):
     pass
 
 
+# --- Proactive pacing ---
+#
+# Groq enforces several per-minute limits per model, and a request that
+# breaks one comes back as a 429. Pacing tracks two of them so a request
+# that won't fit WAITS instead of being sent, rejected and retried:
+#
+#   1. The budget in the response headers (x-ratelimit-limit-tokens /
+#      -remaining-tokens / -reset-tokens = time until full again).
+#   2. Limits that are NOT in the headers, learned from the first 429 that
+#      names them. The vision model's binding limit is one of these: 7000
+#      *input* tokens/min, against which Groq counts each image request as
+#      ~2184 tokens ("Limit 7000, Used 5530, Requested 2184"). From then on
+#      a local copy of that bucket -- refilling Limit/60 tokens a second,
+#      re-synced to Groq's "Used" on every 429 -- decides when the next
+#      request fits.
+#
+# The 429 retry in _post_chat stays as the fallback: the first request(s)
+# to a model go unpaced (nothing is known yet), and other processes using
+# the same API key spend the same budget without this one seeing it.
+
+_budget_lock = threading.Lock()
+_token_budget: dict[str, dict] = {}
+# model -> {
+#   header budget:  "limit", "remaining", "full_in" (s), "at" (monotonic),
+#                   "header_cost" (tokens one request took from it, measured)
+#   learned limit:  "window_limit", "window_cost" (tokens Groq charges one
+#                   request), "window_used" + "window_used_at" (bucket level
+#                   and when it was that), "unpriced" [send times before the
+#                   cost was known]
+# }
+
+_WINDOW_SECONDS = 60
+_LIMIT_IN_429 = re.compile(r"Limit (\d+), Used (\d+), Requested (\d+)")
+
+_DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(ms|h|m|s)")
+_DURATION_SECONDS = {"ms": 0.001, "s": 1, "m": 60, "h": 3600}
+
+
+def _parse_duration(text: str | None) -> float | None:
+    """Groq's reset format: "18.495s", "21m36s", "1h2m3.5s", "250ms"."""
+    parts = _DURATION_PART.findall(text or "")
+    if not parts:
+        return None
+    return sum(float(value) * _DURATION_SECONDS[unit] for value, unit in parts)
+
+
+def _available_tokens(state: dict, now: float) -> float:
+    """The header budget refills steadily, reaching `limit` after `full_in` seconds."""
+    if state["full_in"] <= 0:
+        return state["limit"]
+    refill_per_second = (state["limit"] - state["remaining"]) / state["full_in"]
+    return min(state["limit"], state["remaining"] + refill_per_second * (now - state["at"]))
+
+
+def _header_budget_wait(state: dict, now: float) -> float:
+    cost = state.get("header_cost", 0)
+    if not cost or "limit" not in state or state["full_in"] <= 0:
+        return 0.0
+    available = _available_tokens(state, now)
+    if available >= cost:
+        return 0.0
+    refill_per_second = (state["limit"] - state["remaining"]) / state["full_in"]
+    return (cost - available) / refill_per_second if refill_per_second > 0 else 0.0
+
+
+def _learned_used(state: dict, now: float) -> float:
+    """Our copy of the learned bucket: drains Limit/60 tokens per second."""
+    drain = state["window_limit"] / _WINDOW_SECONDS * (now - state["window_used_at"])
+    return max(0.0, state["window_used"] - drain)
+
+
+def _learned_limit_wait(state: dict, now: float) -> float:
+    limit, cost = state.get("window_limit"), state.get("window_cost")
+    if not limit or not cost:
+        return 0.0
+    over = _learned_used(state, now) + cost - limit
+    return over / (limit / _WINDOW_SECONDS) if over > 0 else 0.0
+
+
+def _wait_for_token_budget(model: str) -> float | None:
+    """
+    Sleeps until the model's known limits can take one more request like
+    the previous ones, then returns how many header-budget tokens are
+    available as it is sent (None when nothing is known about the model).
+    """
+    with _budget_lock:
+        state = dict(_token_budget[model]) if model in _token_budget else None
+    if state is None:
+        return None
+
+    now = time.monotonic()
+    wait = min(max(_header_budget_wait(state, now), _learned_limit_wait(state, now)),
+               MAX_RATE_LIMIT_WAIT_SECONDS)
+    if wait > 0.5:
+        progress.detail(f"Waiting {wait:.0f}s for Groq's per-minute token limit")
+    if wait > 0:
+        time.sleep(wait)
+    return _available_tokens(state, time.monotonic()) if "limit" in state else None
+
+
+def _record_token_budget(model: str, response, available_at_send: float | None,
+                         sent_at: float) -> None:
+    with _budget_lock:
+        state = _token_budget.setdefault(model, {})
+
+        if response.status_code == 429:
+            # Groq naming the limit this request broke, how full it is, and
+            # how big it judged the request to be.
+            match = _LIMIT_IN_429.search(response.text or "")
+            if match:
+                limit, used, requested = (int(g) for g in match.groups())
+                now = time.monotonic()
+                if not state.get("window_cost"):
+                    # First sight of this limit. "Requested" is Groq's
+                    # up-front estimate; what it actually charged shows in
+                    # "Used" -- measured at ~2700 per image against a stated
+                    # 2184 -- so spread "Used" over our recent sends too and
+                    # keep the larger.
+                    recent = [t for t in state.get("unpriced", []) if now - t < _WINDOW_SECONDS]
+                    state["window_cost"] = round(max(requested, used / len(recent) if recent else 0))
+                else:
+                    state["window_cost"] = max(state["window_cost"], requested)
+                state["window_limit"] = min(limit, state.get("window_limit") or limit)
+                state["window_used"], state["window_used_at"] = used, now
+                state.pop("unpriced", None)
+        elif response.status_code == 200:
+            if state.get("window_cost"):
+                state["window_used"] = _learned_used(state, sent_at) + state["window_cost"]
+                state["window_used_at"] = sent_at
+            else:
+                state.setdefault("unpriced", []).append(sent_at)
+
+        headers = response.headers
+        try:
+            limit = int(headers["x-ratelimit-limit-tokens"])
+            remaining = int(headers["x-ratelimit-remaining-tokens"])
+        except (KeyError, TypeError, ValueError):
+            return
+        if response.status_code == 200 and available_at_send is not None:
+            spent = available_at_send - remaining
+            if spent > 0:
+                state["header_cost"] = spent
+        state.update(limit=limit, remaining=remaining, at=time.monotonic(),
+                     full_in=_parse_duration(headers.get("x-ratelimit-reset-tokens")) or 0.0)
+
+
+def _retry_after_seconds(response) -> float:
+    """How long a 429 says to wait: the Retry-After header (whole seconds,
+    rounded up by Groq), or 5s if it's missing."""
+    try:
+        return max(float(response.headers.get("retry-after", "")), 1.0)
+    except ValueError:
+        return 5.0
+
+
 def _call_groq(model: str, system_prompt: str, user_prompt: str, json_mode: bool = True,
                 temperature: float = 0.2) -> str:
-    if not GROQ_API_KEY:
-        raise GroqNotConfigured(
-            "GROQ_API_KEY is not set. Get a free key at console.groq.com/keys "
-            "and add it to backend/.env"
-        )
-
     payload = {
         "model": model,
         "messages": [
@@ -54,10 +210,31 @@ def _call_groq(model: str, system_prompt: str, user_prompt: str, json_mode: bool
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
+    return _post_chat(payload)
+
+
+def _post_chat(payload: dict, timeout: int = 30) -> str:
+    """
+    Sends one chat-completions payload and returns the reply text, with
+    the retry/error handling every Groq call shares. Split out of
+    _call_groq so describe_figure can send multi-part (text + image)
+    messages through the same path.
+    """
+    if not GROQ_API_KEY:
+        raise GroqNotConfigured(
+            "GROQ_API_KEY is not set. Get a free key at console.groq.com/keys "
+            "and add it to backend/.env"
+        )
+    model = payload["model"]
 
     last_error = None
-    for attempt in range(1, MAX_RETRIES + 1):
+    rate_limit_waits = 0
+    attempt = 0
+    while attempt < MAX_RETRIES:
+        attempt += 1
         try:
+            available_at_send = _wait_for_token_budget(model)
+            sent_at = time.monotonic()
             response = requests.post(
                 GROQ_ENDPOINT,
                 headers={
@@ -65,8 +242,9 @@ def _call_groq(model: str, system_prompt: str, user_prompt: str, json_mode: bool
                     "Content-Type": "application/json",
                 },
                 json=payload,
-                timeout=30,
+                timeout=timeout,
             )
+            _record_token_budget(model, response, available_at_send, sent_at)
             if response.status_code == 413:
                 # Groq's own message says which limit was hit (e.g. "Request
                 # too large ... on tokens per minute (TPM): Limit 8000,
@@ -76,6 +254,21 @@ def _call_groq(model: str, system_prompt: str, user_prompt: str, json_mode: bool
                     f"Lower GROQ_MAX_CONTEXT_TOKENS in backend/.env or use fewer/smaller "
                     f"sources. Groq said: {response.text}"
                 )
+            if (response.status_code == 429 and rate_limit_waits < MAX_RATE_LIMIT_WAITS
+                    and _retry_after_seconds(response) <= MAX_RATE_LIMIT_WAIT_SECONDS):
+                # Per-minute limit hit (e.g. the vision model's free tier
+                # is 7000 input tokens/min and one figure is ~2200, so a
+                # paper's figures can't all go in the same minute). Groq
+                # says how long until there's room -- wait that long and
+                # resend. Doesn't use up a network-error attempt. A longer
+                # wait means a daily limit ("try again in 3h"): that falls
+                # through to raise_for_status rather than stalling the run.
+                rate_limit_waits += 1
+                attempt -= 1
+                wait = _retry_after_seconds(response)
+                progress.detail(f"Rate-limited by Groq -- retrying in {wait:.0f}s")
+                time.sleep(wait)
+                continue
             response.raise_for_status()
             return response.json()["choices"][0]["message"]["content"]
 
@@ -293,6 +486,57 @@ def classify_intent(instructions: str) -> str:
         return intent if intent in ("summary", "targeted_qa", "analysis") else "targeted_qa"
     except Exception:
         return "targeted_qa"
+
+
+FIGURE_PROMPT_VERSION = "1"
+# Part of the figure cache key (see doc_parser): bump it whenever the prompt
+# below changes, so cached descriptions written by the old prompt are not
+# silently reused.
+
+_FIGURE_PROMPT = (
+    "This image is a figure from a research paper. Describe it so that the "
+    "description alone can answer questions about the figure. State the kind "
+    "of figure (bar chart, line plot, diagram, photo, ...), the axis labels and "
+    "units, the legend entries or panel labels, and every number or piece of "
+    "text you can actually read. Then state the main comparison or trend it "
+    "shows. Do NOT guess values you cannot read -- say they are not legible. "
+    "Plain prose, no markdown, under 250 words.\n\n"
+    "The paper's own caption for this figure: {caption}"
+)
+
+
+def describe_figure(image_png: bytes, caption: str) -> str:
+    """
+    Returns a text description of one rendered figure. `caption` is the
+    paper's own caption text, given to the model as context -- it tells
+    the model what the figure is meant to show, which makes misreading a
+    chart much less likely than describing it cold.
+
+    Raises GroqNotConfigured without a key, and lets any other request
+    failure propagate: doc_parser decides what to do with a figure that
+    could not be described.
+    """
+    image_b64 = base64.b64encode(image_png).decode("ascii")
+    payload = {
+        "model": GROQ_VISION_MODEL,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": _FIGURE_PROMPT.format(caption=caption[:1500] or "(none found)")},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+            ],
+        }],
+        # temperature=0 -- a description is transcription, not writing, and
+        # it gets cached, so whatever comes back first is what every later
+        # run sees.
+        "temperature": 0,
+        # The model reasons by default; reading labels off a chart doesn't
+        # need it, and the reasoning tokens would only add latency.
+        "reasoning_effort": "none",
+        "max_completion_tokens": 600,
+    }
+    # Images make for slower requests than the text-only calls above.
+    return _post_chat(payload, timeout=60).strip()
 
 
 # Lives in chunker now, so the summary sampler can size its own output

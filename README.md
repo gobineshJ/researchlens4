@@ -116,7 +116,11 @@ researchlens/
 │   ├── .env.example
 │   ├── evaluation_log.jsonl   # created on first run; gitignored, per-machine history
 │   ├── app/
-│   │   ├── main.py            # FastAPI app + endpoints (including /evaluation-history)
+│   │   ├── main.py            # FastAPI app + endpoints; all but /health behind bearer-token auth
+│   │   ├── auth.py            # OAuth2 password flow: login/register, JWT issue + validation
+│   │   ├── db.py              # SQLite: user accounts + which user owns which job
+│   │   ├── create_user.py     # `python -m app.create_user <name>` CLI
+│   │   ├── celery_app.py      # Celery app + the task that runs the pipeline on a worker
 │   │   ├── config.py          # all tunable settings, env vars
 │   │   ├── doc_parser.py      # PDF/DOCX/TXT -> text + metadata
 │   │   ├── scraper.py         # crawl discovery + full-page scrape
@@ -136,7 +140,9 @@ researchlens/
     ├── package.json
     ├── index.html
     └── src/
-        ├── App.jsx             # form, results, evaluation table, run history panel
+        ├── App.jsx             # auth gate, form, job polling, results, evaluation table, run history panel
+        ├── LoginScreen.jsx     # login / create-account form
+        ├── api.js              # API_BASE, token storage, authenticated fetch, blob downloads
         └── main.jsx
 ```
 
@@ -152,13 +158,41 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Then open `.env` and add your Groq API key (free — see below). Run the server:
+Then open `.env` and add your Groq API key (free — see below) and a `JWT_SECRET_KEY`:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Pipeline runs execute on a **Celery** worker, with **Redis** as the broker. Start Redis (e.g. `docker run -p 6379:6379 redis`, or `sudo apt install redis-server` inside WSL), then run the API and a worker in two terminals:
 
 ```bash
 uvicorn app.main:app --reload
+celery -A app.celery_app worker --loglevel=info --pool=solo   # --pool=solo is required on Windows
 ```
 
 This starts the API at `http://127.0.0.1:8000`. Check `http://127.0.0.1:8000/health` — it should return `{"status": "ok"}`.
+
+No Redis? Set `CELERY_TASK_ALWAYS_EAGER=true` in `.env` and skip the worker: the pipeline then runs inside the API process, and `/process` blocks until the report is done.
+
+### Authentication
+
+Every endpoint except `/health`, `/auth/token` and `/auth/register` needs an `Authorization: Bearer <token>` header. Tokens come from the OAuth2 password flow:
+
+```bash
+curl -X POST http://127.0.0.1:8000/auth/token -d "username=alice&password=..."
+# -> {"access_token": "eyJ...", "token_type": "bearer"}
+```
+
+The frontend's login screen does this for you, and has a "Create account" option while `ALLOW_REGISTRATION=true` (the default). Once your accounts exist, set it to `false` and add users from the command line instead:
+
+```bash
+python -m app.create_user alice
+```
+
+In Swagger (`http://127.0.0.1:8000/docs`), use the **Authorize** button to log in before trying the protected endpoints.
+
+`/process` now returns `{"job_id": ...}` immediately (HTTP 202). Poll `GET /jobs/{job_id}` until `status` is `done` (the pipeline's output is in `result`) or `error` (with `error`). Users can only see their own jobs and download their own reports.
 
 ### Frontend
 
@@ -168,7 +202,7 @@ npm install
 npm run dev
 ```
 
-This opens the app at `http://localhost:5173`. It talks to the backend at `http://127.0.0.1:8000` by default (change `API_BASE` at the top of `src/App.jsx` if you run the backend elsewhere).
+This opens the app at `http://localhost:5173`. It talks to the backend at `http://127.0.0.1:8000` by default (change `API_BASE` at the top of `src/api.js` if you run the backend elsewhere).
 
 ### Getting a free Groq API key
 
