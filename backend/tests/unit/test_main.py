@@ -39,6 +39,7 @@ class _FakeResult:
     def __init__(self, state, result=None):
         self.state = state
         self.result = result
+        self.info = result  # Celery exposes the same value as .info
 
 
 def _fake_async_result(monkeypatch, state, result=None):
@@ -183,7 +184,6 @@ def test_job_status_running_includes_progress(auth_headers, captured_jobs, monke
     job_id = client.post("/process", data={"seed_urls": "https://a.example"},
                          headers=auth_headers).json()["job_id"]
     fake = _FakeResult("PROGRESS", {"stage": "extraction", "detail": "Describing Figure 3 of a.pdf (page 7)"})
-    fake.info = fake.result
     from app import main as main_module
     monkeypatch.setattr(main_module, "AsyncResult", lambda job_id, app: fake)
     body = client.get(f"/jobs/{job_id}", headers=auth_headers).json()

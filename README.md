@@ -9,14 +9,26 @@ A RAG (Retrieval-Augmented Generation) research paper summarizer, built as a 3-d
 
 The crawler never does open-ended web search — every crawl starts from a URL you supply, follows links a bounded distance, and a Groq-based relevance filter decides which discovered pages are actually worth scraping before any full extraction happens.
 
-Stack: **React** (frontend) + **FastAPI** (backend) + **ChromaDB** (vector store) + **Groq** (LLM filtering and generation).
+Stack: **React** (frontend) + **FastAPI** (backend) + **Celery + Redis** (background pipeline runs) + **ChromaDB** (vector store) + **Groq** (LLM filtering, figure description and generation). Every API endpoint except the health check is protected by **OAuth2 password-flow login with JWT bearer tokens**.
 
 ## Architecture
 
 ```
-USER
+USER ──► LOGIN SCREEN ──► POST /auth/token (OAuth2 password flow) ──► JWT bearer token
+  │                         (every later request carries "Authorization: Bearer <token>")
+  │
+  ├── POST /process ──► files saved to job_uploads/<job_id>/ ──► job queued on REDIS ──► returns {job_id}
+  │                                                                     │
+  │                                                     CELERY WORKER runs the pipeline below,
+  │                                                     publishing progress ("Describing Figure 3...")
+  │                                                                     │
+  ├── GET /jobs/{job_id} every 2s ◄── queued / running + progress / done + result / error
+  │
+  │   ─── the pipeline (runs on the worker) ───
   │
   ├── Research files (PDF/DOCX/TXT) ──► EXTRACTION (PyMuPDF, python-docx)
+  │                                      PDF figures ──► rendered to PNG ──► GROQ VISION (qwen/qwen3.8-27b)
+  │                                      ──► text description, cited as "paper.pdf, page 7, Figure 3"
   ├── Seed URLs ─────────────────────► CRAWLER (Requests + BeautifulSoup) ──► Candidate pages
   └── Instructions ───────────────────────────────────────────────────────┐
                                                                             │
@@ -88,7 +100,8 @@ USER
                                                                             │
                                                       Grounded report + citations ──► REPORTLAB ──► PDF
                                                                             │
-                                                                     REACT UI ──► Download
+                                                     REACT UI ──► Download (fetched with the bearer token;
+                                                                      only the user who ran the job can download it)
                                                                             │
                                                      Every run's evaluation ──► evaluation_log.jsonl
                                                      (viewable in the UI's "Run history" panel)
@@ -96,9 +109,11 @@ USER
 
 ## Project status
 
-Backend and frontend are both built, including an intent router, query decomposition (compositional multi-hop), hybrid (BM25 + vector) retrieval fused with Reciprocal Rank Fusion, section-aware summarization, cross-encoder reranking, a self-correction retry loop, and persistent run history. Every module has unit tests (113 as of this writing), including the FastAPI routes directly via `TestClient` and the pipeline's own orchestration logic (query decomposition wiring, self-correction retry) via mocked Groq/embedding boundaries. What's been verified with real network access (confirmed working by direct testing): the embedding model, the cross-encoder reranker, and Groq calls. The intent router, hybrid retrieval, RRF fusion, query decomposition, and self-correction retry are new and unit-tested with mocked/synthetic data, but have not yet been run against a live document end-to-end with a real Groq key — that's the next thing to confirm on a machine with network access.
+Backend and frontend are both built, including an intent router, query decomposition (compositional multi-hop), hybrid (BM25 + vector) retrieval fused with Reciprocal Rank Fusion, section-aware summarization, cross-encoder reranking, a self-correction retry loop, and persistent run history. Every module has unit tests (240 as of this writing), including the FastAPI routes directly via `TestClient` and the pipeline's own orchestration logic (query decomposition wiring, self-correction retry) via mocked Groq/embedding boundaries. What's been verified with real network access (confirmed working by direct testing): the embedding model, the cross-encoder reranker, and Groq calls. The intent router, hybrid retrieval, RRF fusion, query decomposition, and self-correction retry are new and unit-tested with mocked/synthetic data, but have not yet been run against a live document end-to-end with a real Groq key — that's the next thing to confirm on a machine with network access.
 
 What's still worth doing before fully trusting this on a new machine: `RERANK_SCORE_WARNING_THRESHOLD`-based retrieval confidence (in `config.py`/`evaluation.py`) is now **informational only** — across three real comparison runs it tracked the wrong direction relative to actual report quality (it failed the best run and passed a weaker one), so it no longer gates the report. `validate_generation`'s groundedness check (vocabulary overlap between the report and its cited sources) is the real quality gate now, and was correct in all three of those comparisons; it's also what the new self-correction retry decides on. `tests/integration/test_pipeline_scenarios.py`'s `test_scenario_1_deliberately_mismatched_topic` exists specifically to exercise this with a real document, and `tests/integration/test_retrieval_metrics.py` (new -- see Testing below) runs Precision@K/Recall@K/MRR against real, labeled retrieval for the first time. **Run the smoke test below first** to confirm the environment works before relying on the full pipeline.
+
+**Login, background jobs and figures** (latest additions): the app opens on a login screen (OAuth2 password flow, bcrypt-hashed passwords, 60-minute JWTs), every endpoint except `/health` requires a bearer token, and users only see their own jobs and reports. `/process` no longer runs the pipeline inside the HTTP request: it queues a Celery job and the UI polls for the result, showing live progress (current stage, which figure is being described, rate-limit waits). Figures in uploaded PDFs are rendered and described by Groq's vision model. Verified end to end with Redis and a Celery worker on Windows (`--pool=solo`).
 
 **On "multi-hop":** what's implemented is query *decomposition* -- a compound instruction gets split into independent sub-questions, each retrieved on its own -- not iterative multi-hop, where each retrieval step's results would shape the next query. That distinction matters: this catches a request that asks about two separate things at once, but it can't chain facts together (e.g. "what dataset did the method that beat the 2019 baseline use?" needs the first fact to look up the second, which this doesn't do).
 
@@ -115,16 +130,20 @@ researchlens/
 │   ├── pytest.ini
 │   ├── .env.example
 │   ├── evaluation_log.jsonl   # created on first run; gitignored, per-machine history
+│   ├── researchlens.db        # created on first run; gitignored -- user accounts + job ownership (SQLite)
+│   ├── figure_cache.json      # created on first run; gitignored -- figure descriptions, so each is only paid for once
+│   ├── job_uploads/           # gitignored -- uploaded files waiting for a worker; deleted when the job finishes
 │   ├── app/
 │   │   ├── main.py            # FastAPI app + endpoints; all but /health behind bearer-token auth
 │   │   ├── auth.py            # OAuth2 password flow: login/register, JWT issue + validation
 │   │   ├── db.py              # SQLite: user accounts + which user owns which job
 │   │   ├── create_user.py     # `python -m app.create_user <name>` CLI
 │   │   ├── celery_app.py      # Celery app + the task that runs the pipeline on a worker
+│   │   ├── progress.py        # stage/detail progress updates, published by the Celery task for the UI
 │   │   ├── config.py          # all tunable settings, env vars
-│   │   ├── doc_parser.py      # PDF/DOCX/TXT -> text + metadata
+│   │   ├── doc_parser.py      # PDF/DOCX/TXT -> text + metadata; PDF figures rendered and described
 │   │   ├── scraper.py         # crawl discovery + full-page scrape
-│   │   ├── groq_client.py     # relevance filter + intent classification + query decomposition + query expansion + report generation
+│   │   ├── groq_client.py     # relevance filter + intent classification + query decomposition + query expansion + figure description + report generation; rate-limit pacing + 429 retry
 │   │   ├── chunker.py         # token-bounded chunking with overlap; also positional sampling for "summary" intent
 │   │   ├── vectorstore.py     # ChromaDB + embeddings, per-source oversampled retrieval
 │   │   ├── hybrid_search.py   # BM25 keyword search + Reciprocal Rank Fusion (RRF) with vector search
@@ -164,12 +183,20 @@ Then open `.env` and add your Groq API key (free — see below) and a `JWT_SECRE
 python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-Pipeline runs execute on a **Celery** worker, with **Redis** as the broker. Start Redis (e.g. `docker run -p 6379:6379 redis`, or `sudo apt install redis-server` inside WSL), then run the API and a worker in two terminals:
+Pipeline runs execute on a **Celery** worker, with **Redis** as the broker. Start Redis first:
+
+* **Windows (WSL):** `wsl`, then once: `sudo apt update && sudo apt install -y redis-server`; after that just `redis-server` (leave that window open).
+* **Docker:** `docker run -p 6379:6379 redis`
+* **Linux/macOS:** your package manager's `redis-server`.
+
+Then run the API and a worker in two more terminals (both from `backend/`, venv activated):
 
 ```bash
 uvicorn app.main:app --reload
 celery -A app.celery_app worker --loglevel=info --pool=solo   # --pool=solo is required on Windows
 ```
+
+The worker does **not** reload on code changes the way `uvicorn --reload` does -- restart it (Ctrl+C, run again) after changing anything under `app/`.
 
 This starts the API at `http://127.0.0.1:8000`. Check `http://127.0.0.1:8000/health` — it should return `{"status": "ok"}`.
 
@@ -214,14 +241,18 @@ Groq's API is genuinely free — no credit card:
 
 Free tier gives ~30 requests/minute and ~14,400 requests/day — enough for this project.
 
+**Figures and the free tier:** the vision model's free tier allows ~7,000 input tokens per minute and Groq charges ~2,700 per figure, so only about 3 figures can be described per minute. A paper with many figures therefore takes a couple of minutes on its first run (the UI shows "Waiting Ns for Groq's per-minute token limit" while it paces itself); descriptions are cached in `figure_cache.json`, so later runs of the same PDF skip that. Set `FIGURE_CAPTIONING_ENABLED=false` in `.env` to skip figure descriptions entirely, or upgrade to Groq's paid Dev tier for higher limits.
+
 ## Smoke test (run this first)
 
 Before trusting the full pipeline, confirm each layer works on your machine, in this order:
 
 1. **Backend health check** — with the backend running, open `http://127.0.0.1:8000/health` in a browser. Expect `{"status": "ok"}`.
-2. **Embedding model download** — the first `/process` call downloads `all-MiniLM-L6-v2` from Hugging Face (a few hundred MB). This needs normal internet access and may take a minute the first time only; it's cached after that. If this step fails with a connection error, check your internet connection — nothing else in the code is the cause.
-3. **Full run** — in the frontend, upload one small PDF or DOCX, leave the URL box empty, type any instruction ("summarize this"), click Process. With no seed URLs, the crawler/filter/scrape stages are skipped automatically, so this isolates: extraction → chunking → embedding → storage → retrieval → Groq generation → PDF. If this works, add a real seed URL (e.g. a Wikipedia page) next to bring the crawler and relevance filter into the run.
-4. **Check the evaluation panel** — the results screen shows a table of pass/fail checks per stage, plus timings. A run isn't "working" just because it didn't crash — check that the evaluation checks actually passed too.
+2. **Worker check** — the Celery worker's terminal shows `ready.` and lists the task `researchlens.run_pipeline`. (Skip this if you set `CELERY_TASK_ALWAYS_EAGER=true`.)
+3. **Login** — open the frontend; you should see the login screen, not the app. Use "Create one" to make an account; you land in the app logged in.
+4. **Embedding model download** — the first `/process` call downloads `all-MiniLM-L6-v2` from Hugging Face (a few hundred MB). This needs normal internet access and may take a minute the first time only; it's cached after that. If this step fails with a connection error, check your internet connection — nothing else in the code is the cause.
+5. **Full run** — in the frontend, upload one small PDF or DOCX, leave the URL box empty, type any instruction ("summarize this"), click Process. The status box should move through the stages ("Reading your documents…", "Writing the report…"), and the worker's terminal logs the run. With no seed URLs, the crawler/filter/scrape stages are skipped automatically, so this isolates: extraction → chunking → embedding → storage → retrieval → Groq generation → PDF. If this works, add a real seed URL (e.g. a Wikipedia page) next to bring the crawler and relevance filter into the run.
+6. **Check the evaluation panel** — the results screen shows a table of pass/fail checks per stage, plus timings. A run isn't "working" just because it didn't crash — check that the evaluation checks actually passed too.
 
 ## Evaluation / validation
 
@@ -230,6 +261,7 @@ Each pipeline stage has a real check, not just a "looks fine" assumption. Every 
 | Stage | What's checked |
 |---|---|
 | Extraction | Every record has non-empty text and required metadata (filename+location, or url+title) |
+| Extraction — figure descriptions | **Only when PDFs contain captioned figures.** How many were described by the vision model vs. kept caption-only. Fails if any couldn't be described (no API key, a request that still failed after rate-limit retries, or over `FIGURE_MAX_PER_DOCUMENT`) — the backend log says which figure and why |
 | Chunking | Chunk sizes stay within the configured token limit; overlap is actually applied between consecutive chunks (checked on real produced output, not just the config) |
 | Crawler | Depth limit respected, all URLs on the seed domain, zero duplicates |
 | Retrieval — intent | Which of `summary` / `targeted_qa` / `analysis` the instructions were classified as, and which retrieval strategy that triggered — always "passes"; this is a transparency record, not a gate |
@@ -249,7 +281,7 @@ Each pipeline stage has a real check, not just a "looks fine" assumption. Every 
 
 Two kinds of tests, in `backend/tests/`:
 
-- **`tests/unit/`** — no network, no Groq key, runs in seconds. Tests document parsing, chunking (including real overlap between consecutive chunks and positional sampling for "summary" intent, not just config), BM25 search and RRF fusion (`hybrid_search.py`) with synthetic corpora, intent classification and query decomposition's fallback behavior, scraper HTML logic, every evaluation check with both a passing and a genuinely failing case, and `test_pipeline.py` — the pipeline's own orchestration logic (does decomposition get skipped for "summary" intent, does the self-correction retry actually fire and adopt the better result) with every Groq/embedding call mocked, so it's testing the WIRING, not re-testing the mocked-out model behavior.
+- **`tests/unit/`** — no network, no Groq key, runs in seconds. Tests document parsing, chunking (including real overlap between consecutive chunks and positional sampling for "summary" intent, not just config), BM25 search and RRF fusion (`hybrid_search.py`) with synthetic corpora, intent classification and query decomposition's fallback behavior, scraper HTML logic, every evaluation check with both a passing and a genuinely failing case, login and token validation (`test_auth.py`: wrong passwords, expired/forged tokens, deleted users, registration rules), the protected routes and job flow (`test_main.py`: every route rejects missing tokens, jobs are enqueued without needing Redis, users can't see each other's jobs or reports), Groq rate-limit pacing and 429 retries (`test_groq_retry.py`, with a fake clock), progress reporting (`test_progress.py`), figure detection (`test_figures.py`), and `test_pipeline.py` — the pipeline's own orchestration logic (does decomposition get skipped for "summary" intent, does the self-correction retry actually fire and adopt the better result) with every Groq/embedding call mocked, so it's testing the WIRING, not re-testing the mocked-out model behavior.
 - **`tests/integration/`** — runs real components. `test_pipeline_scenarios.py` and `test_retrieval_metrics.py` need `GROQ_API_KEY`/`RUN_EMBEDDING_TESTS` respectively; both skip automatically (not an error) if their requirement is missing:
   - **`test_pipeline_scenarios.py`** (needs `GROQ_API_KEY`): a topic mismatch that should fail groundedness on purpose, an image-only PDF that should fail extraction cleanly instead of crashing, and a tiny input smaller than the top-k retrieval count. Two further scenarios (an irrelevant seed URL, a web-only run with no file) hit live URLs and only run if you also set `RUN_NETWORK_URL_TESTS=1`.
   - **`test_retrieval_metrics.py`** (needs `RUN_EMBEDDING_TESTS=1`, downloads the embedding model on first run): runs `evaluate_retrieval()` (Precision@K/Recall@K/MRR) against a real, labeled retrieval for the first time — three topically distinct synthetic documents (machine learning, whales, the printing press) give unambiguous ground truth for what "relevant" means, closing a gap that was previously just a formula with no real evidence behind it.
@@ -265,7 +297,7 @@ RUN_EMBEDDING_TESTS=1 pytest tests/integration/test_retrieval_metrics.py -v   # 
 RUN_NETWORK_URL_TESTS=1 pytest tests/integration/ -v   # also hits live URLs
 ```
 
-**Coverage** is measured automatically on every `pytest` run (configured in `pytest.ini` / `.coveragerc`) and prints a per-file breakdown. From unit tests alone: **77% overall** — `config.py` and `hybrid_search.py` at 100%, `pipeline.py` at 92% (up from 6% before `test_pipeline.py` existed, by mocking out Groq/embeddings rather than needing them live), but `vectorstore.py` still at 20.4% since its real logic only runs against a live ChromaDB/embedding model, which the integration tests exercise (not counted in that baseline). Run `pytest tests/unit/ tests/integration/` together with a real `GROQ_API_KEY` to see the fuller picture.
+**Coverage** is measured automatically on every `pytest` run (configured in `pytest.ini` / `.coveragerc`) and prints a per-file breakdown. From unit tests alone: **85% overall** (was 77% before the auth/jobs/figures work) — `config.py` and `hybrid_search.py` at 100%, `pipeline.py` at 92% (up from 6% before `test_pipeline.py` existed, by mocking out Groq/embeddings rather than needing them live), but `vectorstore.py` still at 20.4% since its real logic only runs against a live ChromaDB/embedding model, which the integration tests exercise (not counted in that baseline). Run `pytest tests/unit/ tests/integration/` together with a real `GROQ_API_KEY` to see the fuller picture.
 
 **Automation:** `.github/workflows/backend-tests.yml` runs the unit tests automatically on every push and pull request via GitHub Actions — no setup needed once this repo is on GitHub, since unit tests need no secrets. The integration tests are deliberately left out of that workflow because they need a real Groq key; if you want those automated too, add `GROQ_API_KEY` as a repository secret (Settings → Secrets and variables → Actions) and extend the workflow to pass it through and run `pytest tests/integration/`.
 
@@ -291,11 +323,20 @@ This started as a one-day build and has since grown well past the original three
 * Self-correcting retry: if the first pass's groundedness comes back below threshold, the pipeline reformulates its search queries and retries retrieval + generation once, keeping whichever attempt scored higher — **Done**, unit-tested (only applies to `targeted_qa`/`analysis`; "summary"'s positional sampling doesn't depend on the search query, so retrying it wouldn't change anything)
 * Precision@K/Recall@K/MRR run against a real, labeled retrieval (`tests/integration/test_retrieval_metrics.py`) — **Done**, closing a gap that was previously just an untested formula
 
+* Background pipeline runs on a Celery worker (Redis broker), with job polling and live progress in the UI — **Done**, verified with a real worker on Windows
+* Login screen + OAuth2 password flow with JWT bearer tokens protecting every endpoint; per-user job and report access — **Done**, unit-tested and verified in the browser
+* PDF figures rendered and described by Groq's vision model, cached per image — **Done**
+* Groq rate limits handled: requests paced against the model's per-minute budget (including the vision model's input-token limit, learned from Groq's 429 message), remaining 429s waited out and retried — **Done**, verified against the live API (8 of 8 figures described, 1 rejected request instead of 6)
+
 **Still open, honestly:**
 * The intent router, hybrid+RRF retrieval, query decomposition, self-correction retry, and span-coverage check are unit-tested against synthetic/mocked data but have not yet been exercised end-to-end against a real document with a live Groq key — that's the next real-world check to run.
 * Groundedness is vocabulary overlap, not true entailment — a report could reuse a source's words while misstating their meaning and still pass. Self-correction inherits this: it optimizes for the same word-overlap number, so it can't catch a retry that's equally fluent but still wrong in substance.
 * True iterative multi-hop (each retrieval step's results shaping the next query) is not implemented -- only compositional decomposition (see above). This mainly matters for cross-document questions that need chaining a fact found in one document to look something up in another.
 * Some chunks' first `RERANK_SNIPPET_CHARS` characters can be page headers, figure captions, or table numbers rather than real content (seen on a real academic PDF) — this affects what the reranker actually scores. Trimming boilerplate before the snippet is taken would likely help; not yet done.
+* The login token is kept in the browser's `localStorage` (survives a refresh). Fine for a local tool; for a public deployment an httpOnly cookie is safer against XSS, and CORS (`allow_origins=["*"]`) should be narrowed too.
+* There are no refresh tokens: after 60 minutes (`ACCESS_TOKEN_EXPIRE_MINUTES`) the user is sent back to the login screen. A run in progress keeps going on the worker, but its result can only be seen by polling again after logging back in.
+* Run history (`/evaluation-history`) is shared: any logged-in user sees every run's evaluation summary. Jobs and PDF reports are per-user.
+* Rate-limit pacing is per process: two workers sharing one Groq key don't see each other's usage, so they'll still hit some 429s (which are retried).
 * The self-correction retry costs an extra Groq call (or several, with decomposition) plus a second retrieval pass whenever the first attempt is poorly grounded -- for a document genuinely unrelated to the instructions (like the deliberate-mismatch test scenario), this means paying for a retry that was never going to succeed. Not a bug, just a real cost/latency trade-off worth knowing about.
 
 ## Support

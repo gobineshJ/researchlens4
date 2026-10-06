@@ -2,7 +2,7 @@
 Thin wrapper around Groq's chat completions endpoint (OpenAI-compatible,
 so plain `requests` is enough -- no extra SDK dependency).
 
-Three jobs:
+Jobs:
   filter_relevant_pages() -- Day 2: score discovered pages, decide which
                               are worth fully scraping.
   expand_query()           -- rewrites a short/generic instruction into a
@@ -13,9 +13,13 @@ Three jobs:
   describe_figure()       -- turn a rendered PDF figure into a text
                               description that can be chunked like any text.
 
-Both raise GroqNotConfigured with a clear message if no API key is set,
-rather than failing with a confusing HTTP error -- the pipeline can catch
-this and tell the user exactly what's missing.
+All of them raise GroqNotConfigured with a clear message if no API key
+is set, rather than failing with a confusing HTTP error -- the pipeline
+can catch this and tell the user exactly what's missing.
+
+Every request goes through _post_chat, which also handles Groq's
+per-minute rate limits: requests are paced so they fit the model's
+token budget, and a 429 that happens anyway is waited out and retried.
 """
 
 import base64

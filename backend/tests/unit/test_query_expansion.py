@@ -5,7 +5,6 @@ must ALWAYS return the original instructions as the first element,
 even when Groq is unreachable or misconfigured.
 """
 
-import os
 from app import groq_client
 
 
