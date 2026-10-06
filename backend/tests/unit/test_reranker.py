@@ -5,7 +5,6 @@ sorting/truncation/fallback behavior, which is what the pipeline
 actually depends on being correct.
 """
 
-import pytest
 from app import reranker
 
 
