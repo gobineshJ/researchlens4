@@ -2,7 +2,7 @@
 
 ## Description
 
-A RAG (Retrieval-Augmented Generation) research paper summarizer, built as a 3-day AI/ML intern training project. It combines evidence from two sources into one citation-aware report:
+A RAG (Retrieval-Augmented Generation) research paper summarizer, built as a AI/ML intern training project. It combines evidence from two sources into one citation-aware report:
 
 * Uploaded research documents (PDF, DOCX, TXT)
 * A bounded web crawl starting from user-supplied reference URLs — never open-ended search
