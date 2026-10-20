@@ -387,9 +387,15 @@ def _read_stream(response, on_text) -> str:
     on_text(text_so_far) as content arrives, and returns the full text.
     Reasoning models stream their reasoning in a separate "reasoning"
     field first; only "content" is the answer.
+
+    Lines are decoded as UTF-8 explicitly: the stream's Content-Type
+    declares no charset, so requests' own decoding falls back to
+    ISO-8859-1 and turns every non-ASCII character into mojibake
+    ("ClinBERT-L" with a non-breaking hyphen came out as "ClinBERTâ\x80\x91L").
     """
     text = ""
-    for line in response.iter_lines(decode_unicode=True):
+    for raw in response.iter_lines():
+        line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
         if not line or not line.startswith("data:"):
             continue
         data = line[len("data:"):].strip()
@@ -879,6 +885,16 @@ def fit_chunks_to_budget(chunks: list[dict], max_tokens: int = GROQ_MAX_CONTEXT_
 
 _CITATION_MARKER = re.compile(r"\[(\d+(?:\s*[-–,]\s*\d+)*)\]")
 
+# gpt-oss models sometimes cite in their native browsing style -- "【2】",
+# "【2†L10-L12】" -- or with full-width brackets "［2］". Every reader of
+# citations (citations_used, the entailment check, the UI) expects "[2]",
+# so these are rewritten to it as the report comes in.
+_FOREIGN_MARKER = re.compile(r"[【［]\s*(\d+(?:\s*[-–,]\s*\d+)*)\s*(?:†[^】］]*)?[】］]")
+
+
+def normalize_citations(text: str) -> str:
+    return _FOREIGN_MARKER.sub(lambda m: f"[{m.group(1)}]", text or "")
+
 
 def cited_indices(report_text: str, num_sources: int) -> list[int]:
     """Every source index the report's [n] / [1, 3] / [2-4] markers cite,
@@ -950,7 +966,7 @@ def generate_report(chunks: list[dict], instructions: str) -> dict:
         now = time.monotonic()
         if now - last_sent[0] >= DRAFT_UPDATE_SECONDS:
             last_sent[0] = now
-            progress.draft(text_so_far)
+            progress.draft(normalize_citations(text_so_far))
 
     payload = {
         "model": GROQ_GENERATION_MODEL,
@@ -962,7 +978,7 @@ def generate_report(chunks: list[dict], instructions: str) -> dict:
     }
     # A long report can take a while to finish; the timeout is per read,
     # and tokens keep arriving throughout.
-    report_text = _post_chat(payload, timeout=60, on_text=on_text).strip()
+    report_text = normalize_citations(_post_chat(payload, timeout=60, on_text=on_text)).strip()
     progress.draft(report_text)
     return {"report_text": report_text, "citations_used": citations_for(report_text, chunks)}
 

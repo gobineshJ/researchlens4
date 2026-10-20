@@ -7,6 +7,7 @@ on the golden set in eval/data/golden/ and scores every answer.
     python -m eval.run_eval --set MULTI_HOP_ENABLED=false --tag no-multihop
     python -m eval.run_eval --judge-answers          # + LLM answer grading
     python -m eval.run_eval --compare eval/results/A.json eval/results/B.json
+    python -m eval.run_eval --retry-incomplete eval/results/A.json
 
 Per question it records:
   evidence_recall  share of the gold evidence passages that reached the
@@ -22,6 +23,13 @@ Per question it records:
   seconds          wall-clock time
 
 Results go to eval/results/<timestamp>_<tag>.json and a table is printed.
+
+A question is "incomplete" when a Groq call inside it failed (usually the
+free tier's daily limit): its report may exist, but its entailment value
+or answer grade is missing, so it is kept out of the averages rather than
+quietly averaged in. Once the daily limit is hit, the remaining questions
+are skipped (they would fail the same way) -- rerun just the incomplete
+ones later with --retry-incomplete, which merges them into a new file.
 Cost: every question is a full pipeline run -- roughly 6-10 Groq calls,
 one of them to the large generation model. On the free tier expect
 about a minute per question, and the whole set uses a noticeable part of
@@ -30,6 +38,7 @@ the daily token allowance; use --only for quick checks.
 
 import argparse
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -101,9 +110,15 @@ ANSWER_JUDGE_PROMPT = (
 _GRADES = {"correct": 1.0, "partial": 0.5, "incorrect": 0.0}
 
 
+_MARKERS = re.compile(r"\s*\[\d+(?:\s*[-–,]\s*\d+)*\]")
+
+
 def judge_answer(question: str, reference: str, answer: str) -> tuple[float | None, str]:
     from app import groq_client
     from app.config import GROQ_JUDGE_MODEL
+    # Citation markers are not part of the answer -- left in, the grader
+    # reads "4.2 F1 points [2]" as stating a wrong extra number.
+    answer = _MARKERS.sub("", answer)
     raw = groq_client._call_groq(
         GROQ_JUDGE_MODEL, ANSWER_JUDGE_PROMPT,
         f"Question: {question}\n\nReference answer: {reference}\n\nAnswer to grade:\n{answer}",
@@ -140,14 +155,67 @@ def run_question(question: dict, docs_dir: Path, counter: _GroqCallCounter, grad
         report_text=report,
         errors=evaluation.get("errors", []),
     )
+    problems = list(row["errors"])
     if grade:
         try:
             row["answer_score"], row["answer_reason"] = judge_answer(
                 question["question"], question["reference_answer"], report)
         except Exception as exc:
             row["answer_reason"] = f"grading failed: {exc}"
+            problems.append(row["answer_reason"])
+    if problems:
+        row["incomplete"] = "; ".join(p[:200] for p in problems)
     row.update(groq_calls=counter.count - calls_before, seconds=round(time.perf_counter() - started, 1))
     return row
+
+
+def _hit_rate_limit(row: dict) -> bool:
+    """A 429 that surfaces here survived _post_chat's own retries -- in
+    practice the daily limit, which every later question would hit too."""
+    text = f"{row.get('error', '')} {row.get('incomplete', '')}"
+    return "429" in text or "Too Many Requests" in text
+
+
+def run_questions(questions: list[dict], docs_dir: Path, grade: bool) -> list[dict]:
+    counter = _GroqCallCounter()
+    rows: list[dict] = []
+    for n, question in enumerate(questions, 1):
+        print(f"[{n}/{len(questions)}] {question['id']}: {question['question']}", flush=True)
+        row = run_question(question, docs_dir, counter, grade)
+        rows.append(row)
+        if "error" in row:
+            print("    ERROR " + row["error"], flush=True)
+        else:
+            print("    " + "  ".join(f"{m}={_fmt(row.get(m))}" for m in metrics.METRICS
+                                     if row.get(m) is not None), flush=True)
+            if "incomplete" in row:
+                print("    INCOMPLETE " + row["incomplete"][:160], flush=True)
+        if _hit_rate_limit(row) and n < len(questions):
+            print(f"\nGroq's rate limit was reached -- skipping the remaining {len(questions) - n} "
+                  f"question(s). Rerun them later with --retry-incomplete.", flush=True)
+            rows.extend({"id": q["id"], "type": q["type"], "question": q["question"],
+                         "incomplete": "not run: Groq rate limit reached earlier in this run"}
+                        for q in questions[n:])
+            break
+    return rows
+
+
+def _complete(rows: list[dict]) -> list[dict]:
+    return [r for r in rows if "error" not in r and "incomplete" not in r]
+
+
+def save_results(rows: list[dict], overrides: dict, grade: bool, out_path: Path) -> dict:
+    summary = metrics.aggregate(_complete(rows))
+    out_path.write_text(json.dumps({"overrides": overrides, "judge_answers": grade, "summary": summary,
+                                    "questions": rows}, indent=2), encoding="utf-8")
+    print()
+    print_table(summary)
+    skipped = [r["id"] for r in rows if r not in _complete(rows)]
+    if skipped:
+        print(f"\n{len(skipped)} question(s) failed or are incomplete and are NOT in the averages: "
+              f"{', '.join(skipped)}\nRerun them with:  python -m eval.run_eval --retry-incomplete {out_path}")
+    print(f"\nSaved {out_path}")
+    return summary
 
 
 def _fmt(value) -> str:
@@ -168,6 +236,13 @@ def compare(path_a: str, path_b: str) -> None:
     a, b = (json.loads(Path(p).read_text(encoding="utf-8")) for p in (path_a, path_b))
     print(f"A = {Path(path_a).name}  {a.get('overrides') or ''}")
     print(f"B = {Path(path_b).name}  {b.get('overrides') or ''}\n")
+    # Averages over different question sets aren't comparable -- say so.
+    complete_a = {r["id"] for r in _complete(a.get("questions", []))}
+    complete_b = {r["id"] for r in _complete(b.get("questions", []))}
+    if complete_a != complete_b:
+        print(f"WARNING: the runs averaged different questions ({len(complete_a)} vs {len(complete_b)} complete). "
+              f"Only in A: {sorted(complete_a - complete_b) or '-'}; only in B: {sorted(complete_b - complete_a) or '-'}. "
+              f"Rerun the incomplete ones with --retry-incomplete before trusting the deltas.\n")
     print("| group | metric | A | B | B − A |")
     print("|---|---|---|---|---|")
     for group in a["summary"]:
@@ -190,6 +265,9 @@ def main(argv=None) -> None:
     parser.add_argument("--questions", default=str(metrics.GOLDEN_DIR / "questions.jsonl"))
     parser.add_argument("--docs", default=str(metrics.GOLDEN_DIR / "docs"))
     parser.add_argument("--compare", nargs=2, metavar=("A.json", "B.json"))
+    parser.add_argument("--retry-incomplete", metavar="RESULTS.json",
+                        help="rerun only that file's failed/incomplete questions, with its settings, "
+                             "and save the merged result as a new file")
     args = parser.parse_args(argv)
 
     if args.compare:
@@ -199,35 +277,36 @@ def main(argv=None) -> None:
     from app import config, evaluation
     if not config.GROQ_API_KEY:
         raise SystemExit("GROQ_API_KEY is not set in backend/.env -- the evaluation runs the real pipeline.")
-    overrides = apply_overrides(args.overrides)
+
+    all_questions = metrics.load_jsonl(args.questions)
+    previous = None
+    if args.retry_incomplete:
+        previous = json.loads(Path(args.retry_incomplete).read_text(encoding="utf-8"))
+        redo = {r["id"] for r in previous["questions"] if r not in _complete(previous["questions"])}
+        if not redo:
+            raise SystemExit(f"Nothing to retry: every question in {args.retry_incomplete} is complete.")
+        questions = [q for q in all_questions if q["id"] in redo]
+        overrides = apply_overrides([f"{k}={v}" for k, v in (previous.get("overrides") or {}).items()])
+        grade = previous.get("judge_answers", False)
+        tag = Path(args.retry_incomplete).stem.split("_", 1)[1] + "-retry" if "_" in Path(args.retry_incomplete).stem else "retry"
+    else:
+        questions = [q for q in all_questions
+                     if not args.only or any(q["id"].startswith(p) for p in args.only)]
+        overrides = apply_overrides(args.overrides)
+        grade = args.judge_answers
+        tag = args.tag
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     RESULTS_DIR.mkdir(exist_ok=True)
-    out_path = RESULTS_DIR / f"{stamp}{'_' + args.tag if args.tag else ''}.json"
+    out_path = RESULTS_DIR / f"{stamp}{'_' + tag if tag else ''}.json"
     # Eval runs go to their own log, never into the app's Run history.
     evaluation.EVALUATION_LOG_PATH = str(out_path.with_suffix(".log.jsonl"))
 
-    questions = [q for q in metrics.load_jsonl(args.questions)
-                 if not args.only or any(q["id"].startswith(p) for p in args.only)]
-    counter = _GroqCallCounter()
-    rows = []
-    for n, question in enumerate(questions, 1):
-        print(f"[{n}/{len(questions)}] {question['id']}: {question['question']}", flush=True)
-        row = run_question(question, Path(args.docs), counter, args.judge_answers)
-        rows.append(row)
-        print("    " + ("ERROR " + row["error"] if "error" in row else
-                        "  ".join(f"{m}={_fmt(row.get(m))}" for m in metrics.METRICS if row.get(m) is not None)),
-              flush=True)
-
-    summary = metrics.aggregate([r for r in rows if "error" not in r])
-    out_path.write_text(json.dumps({"overrides": overrides, "judge_answers": args.judge_answers,
-                                    "summary": summary, "questions": rows}, indent=2), encoding="utf-8")
-    print()
-    print_table(summary)
-    failed = [r["id"] for r in rows if "error" in r]
-    if failed:
-        print(f"\n{len(failed)} question(s) failed to run: {', '.join(failed)}")
-    print(f"\nSaved {out_path}")
+    rows = run_questions(questions, Path(args.docs), grade)
+    if previous is not None:
+        fresh = {r["id"]: r for r in rows}
+        rows = [fresh.get(r["id"], r) for r in previous["questions"]]
+    save_results(rows, overrides, grade, out_path)
 
 
 if __name__ == "__main__":

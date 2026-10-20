@@ -356,7 +356,10 @@ python -m eval.run_eval --judge-answers                                   # whol
 python -m eval.run_eval --only mh- qa-corpus                              # a subset, by id prefix
 python -m eval.run_eval --set MULTI_HOP_ENABLED=false --tag no-multihop   # ablation: turn a feature off
 python -m eval.run_eval --compare eval/results/A.json eval/results/B.json # before/after table
+python -m eval.run_eval --retry-incomplete eval/results/A.json            # rerun questions the daily limit cut off
 ```
+
+If a Groq call inside a question fails (in practice, the free tier's daily limit), the question is marked **incomplete** and kept out of the averages, so "the quota ran out" is never mixed with "the system got it wrong". The run stops at that point instead of failing the remaining questions one by one. `--retry-incomplete` reruns just those questions later, with the same settings, and saves a merged file. `--compare` warns when two runs averaged different sets of questions.
 
 Each question is scored on `evidence_recall` (did the gold passages reach the report's context), `evidence_mrr`, `fact_recall` (required facts stated), `answer_score` (LLM-graded against the reference, with `--judge-answers`), plus the pipeline's own entailment and groundedness, hops taken, Groq calls and seconds. Results go to `eval/results/`. The whole set uses a noticeable part of the free tier's daily token allowance, so use `--only` for quick checks.
 
