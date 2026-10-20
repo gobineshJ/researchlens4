@@ -89,7 +89,9 @@ METRICS = ["evidence_recall", "evidence_mrr", "fact_recall", "answer_score",
 
 
 def aggregate(rows: list[dict]) -> dict:
-    """Mean of every metric, overall and per question type."""
+    """Mean of every metric, overall and per question type. Pass only
+    complete rows (run_eval does): averaging in questions whose Groq calls
+    failed would mix "the system got it wrong" with "the quota ran out"."""
     groups: dict[str, list[dict]] = {"ALL": rows}
     for row in rows:
         groups.setdefault(row["type"], []).append(row)
