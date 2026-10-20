@@ -9,7 +9,7 @@ import uuid
 import chromadb
 from sentence_transformers import SentenceTransformer
 
-from .config import CHROMA_PERSIST_DIR, EMBEDDING_MODEL_NAME
+from .config import CHROMA_MODE, CHROMA_PERSIST_DIR, EMBEDDING_MODEL_NAME
 
 _embedder = None
 
@@ -22,7 +22,22 @@ def _get_embedder() -> SentenceTransformer:
 
 
 def get_client() -> chromadb.Client:
-    return chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
+    # EphemeralClient instances share one in-memory store per process, so
+    # collections outlive the client object -- drop_session_collection is
+    # what actually frees them.
+    if CHROMA_MODE == "persistent":
+        return chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
+    return chromadb.EphemeralClient()
+
+
+def drop_session_collection(collection) -> None:
+    """Deletes one run's collection once the run is over, so neither memory
+    (ephemeral mode) nor disk (persistent mode) grows with every run.
+    Never raises: a failed cleanup must not fail a finished report."""
+    try:
+        get_client().delete_collection(collection.name)
+    except Exception:
+        pass
 
 
 def new_session_collection(session_id: str | None = None):

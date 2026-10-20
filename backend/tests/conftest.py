@@ -45,11 +45,21 @@ def _isolated_auth_db(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _fresh_groq_token_budget():
+def _fresh_groq_token_budget(monkeypatch):
     """Rate-limit state learned from one test's fake responses must not
-    make the next test wait."""
+    make the next test wait -- and must never be written to (or read from)
+    a real Redis that running workers share."""
     from app import groq_client
     groq_client._token_budget.clear()
+    monkeypatch.setattr(groq_client, "_store", groq_client._local_store)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_robots_cache():
+    """robots.txt rules cached by one test must not leak into the next."""
+    from app import scraper
+    scraper._robots_cache.clear()
+    scraper._last_request_at.clear()
 
 
 @pytest.fixture

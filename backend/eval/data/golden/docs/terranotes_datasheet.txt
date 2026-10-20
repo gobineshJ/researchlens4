@@ -1,0 +1,31 @@
+Datasheet: The TerraNotes Clinical Text Corpus (version 2)
+
+Motivation
+
+TerraNotes was created by the Westbrook Health Data Consortium in 2022 to give researchers a large, multi-site collection of clinical notes for developing and testing language technology. Before TerraNotes, most public clinical text came from a single hospital, which made it hard to know whether a model would work anywhere else.
+
+Composition
+
+The corpus contains 1.2 million clinical notes written between 2015 and 2021. The notes come from 14 hospitals in three countries: Canada, Kenya and Chile. Notes from Chile were written in Spanish and were translated into English by a professional medical translation service before release, so every note in the released corpus is in English. Note types include discharge summaries, progress notes, radiology reports and nursing notes. Discharge summaries make up 38 percent of the corpus.
+
+The distribution of care settings is uneven. Sixty-one percent of the notes come from adult intensive care units, and only 4 percent come from paediatric wards. Users should expect models trained on TerraNotes to perform worse on paediatric and outpatient notes than on adult inpatient notes.
+
+Collection and de-identification
+
+Notes were exported from each hospital's electronic health record system by local staff. Names, dates, addresses, phone numbers and record numbers were removed using a rule-based de-identification tool, after which a random 5 percent sample of notes was reviewed by hand. The manual review found residual identifiers in 0.3 percent of the sampled notes; these were removed and the rules were updated before the final release.
+
+Labels
+
+Each discharge summary is labelled with the diagnosis codes assigned by the hospital's coding department at the time of discharge. Codes were not re-checked for TerraNotes, so the labels contain the same errors as routine hospital coding. An audit of 1,000 summaries found that 7 percent had at least one missing or incorrect code.
+
+Splits
+
+The official split assigns 80 percent of patients to training, 10 percent to validation and 10 percent to testing. All notes from the same patient are in the same split, so that no patient appears in both training and test data.
+
+Licence and access
+
+TerraNotes is released for research use only under the Creative Commons Attribution-NonCommercial 4.0 licence (CC BY-NC 4.0). Access requires completing a short data use agreement and a course on handling health data. Commercial use, including training models that are sold or used to provide paid services, is not permitted.
+
+Maintenance
+
+The Westbrook Health Data Consortium maintains the corpus and publishes corrections twice a year. Version 2, described here, fixed 2,140 notes in which de-identification had removed medication names by mistake.

@@ -23,17 +23,22 @@ token budget, and a 429 that happens anyway is waited out and retried.
 """
 
 import base64
+import copy
 import json
+import logging
 import re
 import threading
 import time
+import uuid
 import requests
 
 from . import chunker, progress
 
 from .config import (
     GROQ_API_KEY, GROQ_FILTER_MODEL, GROQ_GENERATION_MODEL, GROQ_MAX_CONTEXT_TOKENS,
-    GROQ_VISION_MODEL, QUERY_EXPANSION_VARIANTS,
+    GROQ_VISION_MODEL, QUERY_EXPANSION_VARIANTS, GROQ_RATE_LIMIT_REDIS_URL,
+    GROQ_JUDGE_MODEL, ENTAILMENT_MAX_SOURCE_TOKENS, ENTAILMENT_MAX_COMPLETION_TOKENS,
+    MULTI_HOP_EVIDENCE_TOKENS,
 )
 
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
@@ -45,6 +50,12 @@ MAX_RATE_LIMIT_WAIT_SECONDS = 60
 
 class GroqNotConfigured(Exception):
     pass
+
+
+class GroqJSONGenerationFailed(requests.HTTPError):
+    """Groq's 400 "json_validate_failed": in JSON mode the model didn't
+    produce a valid document -- with reasoning models, usually because the
+    reasoning used up max_completion_tokens before the JSON was written."""
 
 
 # --- Proactive pacing ---
@@ -63,26 +74,120 @@ class GroqNotConfigured(Exception):
 #      re-synced to Groq's "Used" on every 429 -- decides when the next
 #      request fits.
 #
+# Every worker process sharing the API key spends the same budget, so the
+# state lives in a store: Redis when GROQ_RATE_LIMIT_REDIS_URL is set (the
+# Celery broker by default), so all processes pace against one copy, or a
+# per-process dict otherwise. A request RESERVES its expected cost in the
+# store as it is sent, so a second process deciding at the same moment sees
+# the budget already spoken for, instead of both seeing room and both
+# being rejected.
+#
 # The 429 retry in _post_chat stays as the fallback: the first request(s)
-# to a model go unpaced (nothing is known yet), and other processes using
-# the same API key spend the same budget without this one seeing it.
+# to a model go unpaced (nothing is known yet), and anything else using the
+# same key outside this app spends the budget without being seen.
 
-_budget_lock = threading.Lock()
+logger = logging.getLogger(__name__)
+
 _token_budget: dict[str, dict] = {}
 # model -> {
-#   header budget:  "limit", "remaining", "full_in" (s), "at" (monotonic),
-#                   "header_cost" (tokens one request took from it, measured)
+#   header budget:  "limit", "remaining", "full_in" (s), "at" (clock time),
+#                   "header_cost" (tokens one request took from it, measured),
+#                   "inflight" [[reservation id, sent at, cost], ...] (sent,
+#                   not yet reflected in the headers)
 #   learned limit:  "window_limit", "window_cost" (tokens Groq charges one
 #                   request), "window_used" + "window_used_at" (bucket level
 #                   and when it was that), "unpriced" [send times before the
 #                   cost was known]
+#   "version":      bumped on every change, so a waiting request can tell
+#                   whether another process moved the budget while it slept
 # }
 
 _WINDOW_SECONDS = 60
+_INFLIGHT_SECONDS = 60  # a reservation whose response never came is dropped after this
 _LIMIT_IN_429 = re.compile(r"Limit (\d+), Used (\d+), Requested (\d+)")
 
 _DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(ms|h|m|s)")
 _DURATION_SECONDS = {"ms": 0.001, "s": 1, "m": 60, "h": 3600}
+
+
+class _LocalBudgetStore:
+    """Pacing state for this process only (tests, eager mode, no Redis)."""
+    shared = False
+
+    def __init__(self, states: dict[str, dict]):
+        self._states = states
+        self._lock = threading.Lock()
+
+    def get(self, model: str) -> dict | None:
+        with self._lock:
+            state = self._states.get(model)
+            return copy.deepcopy(state) if state is not None else None
+
+    def update(self, model: str, change):
+        with self._lock:
+            return change(self._states.setdefault(model, {}))
+
+
+class _RedisBudgetStore:
+    """Pacing state shared by every process pointed at the same Redis."""
+    shared = True
+    _KEY = "researchlens:groq_budget:{}"
+
+    def __init__(self, url: str):
+        import redis
+        self._redis = redis.Redis.from_url(url, socket_connect_timeout=2, socket_timeout=2)
+        self._redis.ping()
+
+    def get(self, model: str) -> dict | None:
+        raw = self._redis.get(self._KEY.format(model))
+        return json.loads(raw) if raw else None
+
+    def update(self, model: str, change):
+        key = self._KEY.format(model)
+        with self._redis.lock(key + ":lock", timeout=10, blocking_timeout=10):
+            raw = self._redis.get(key)
+            state = json.loads(raw) if raw else {}
+            result = change(state)
+            self._redis.set(key, json.dumps(state), ex=24 * 3600)
+            return result
+
+
+_local_store = _LocalBudgetStore(_token_budget)
+_store = None  # chosen on first use -- see _budget_store()
+
+
+def _budget_store():
+    global _store
+    if _store is None:
+        _store = _local_store
+        if GROQ_RATE_LIMIT_REDIS_URL:
+            try:
+                _store = _RedisBudgetStore(GROQ_RATE_LIMIT_REDIS_URL)
+            except Exception as exc:
+                logger.warning("Groq rate-limit pacing is per-process: Redis at %s is unreachable (%s)",
+                               GROQ_RATE_LIMIT_REDIS_URL, exc)
+    return _store
+
+
+def _store_call(method: str, *args):
+    """Runs one store operation; a Redis failure mid-run downgrades to
+    per-process pacing instead of failing the Groq request."""
+    global _store
+    store = _budget_store()
+    try:
+        return getattr(store, method)(*args)
+    except Exception as exc:
+        if store is _local_store:
+            raise
+        logger.warning("Shared Groq rate-limit state failed (%s) -- pacing per-process from now on", exc)
+        _store = _local_store
+        return getattr(_local_store, method)(*args)
+
+
+def _now() -> float:
+    # A shared store compares timestamps written by different processes,
+    # which only wall-clock time allows; monotonic time is per-process.
+    return time.time() if _budget_store().shared else time.monotonic()
 
 
 def _parse_duration(text: str | None) -> float | None:
@@ -101,11 +206,15 @@ def _available_tokens(state: dict, now: float) -> float:
     return min(state["limit"], state["remaining"] + refill_per_second * (now - state["at"]))
 
 
+def _live_inflight(state: dict, now: float) -> list:
+    return [entry for entry in state.get("inflight", []) if now - entry[1] < _INFLIGHT_SECONDS]
+
+
 def _header_budget_wait(state: dict, now: float) -> float:
     cost = state.get("header_cost", 0)
     if not cost or "limit" not in state or state["full_in"] <= 0:
         return 0.0
-    available = _available_tokens(state, now)
+    available = _available_tokens(state, now) - sum(e[2] for e in _live_inflight(state, now))
     if available >= cost:
         return 0.0
     refill_per_second = (state["limit"] - state["remaining"]) / state["full_in"]
@@ -126,31 +235,77 @@ def _learned_limit_wait(state: dict, now: float) -> float:
     return over / (limit / _WINDOW_SECONDS) if over > 0 else 0.0
 
 
-def _wait_for_token_budget(model: str) -> float | None:
+def _wait_for_token_budget(model: str) -> dict | None:
     """
     Sleeps until the model's known limits can take one more request like
-    the previous ones, then returns how many header-budget tokens are
-    available as it is sent (None when nothing is known about the model).
+    the previous ones, then reserves that request's cost in the store.
+    Returns the reservation ("id", "window": whether the learned bucket was
+    charged, "available": header-budget tokens free as it is sent), or None
+    when nothing is known about the model yet.
+
+    After a sleep the budget is only re-checked if another process changed
+    it in the meantime -- otherwise the wait was already computed against
+    the state that still holds. Total waiting is capped at
+    MAX_RATE_LIMIT_WAIT_SECONDS; past that the request goes anyway and the
+    429 retry takes over.
     """
-    with _budget_lock:
-        state = dict(_token_budget[model]) if model in _token_budget else None
-    if state is None:
-        return None
-
-    now = time.monotonic()
-    wait = min(max(_header_budget_wait(state, now), _learned_limit_wait(state, now)),
-               MAX_RATE_LIMIT_WAIT_SECONDS)
-    if wait > 0.5:
-        progress.detail(f"Waiting {wait:.0f}s for Groq's per-minute token limit")
-    if wait > 0:
+    waited, seen_version = 0.0, None
+    while True:
+        state = _store_call("get", model)
+        if state is None:
+            return None
+        if seen_version is not None and state.get("version") == seen_version:
+            break
+        now = _now()
+        wait = min(max(_header_budget_wait(state, now), _learned_limit_wait(state, now)),
+                   MAX_RATE_LIMIT_WAIT_SECONDS - waited)
+        if wait <= 0:
+            break
+        if wait > 0.5:
+            progress.detail(f"Waiting {wait:.0f}s for Groq's per-minute token limit")
         time.sleep(wait)
-    return _available_tokens(state, time.monotonic()) if "limit" in state else None
+        waited += wait
+        seen_version = state.get("version")
+
+    reservation_id = uuid.uuid4().hex
+
+    def reserve(state: dict) -> dict:
+        now = _now()
+        inflight = _live_inflight(state, now)
+        available = (_available_tokens(state, now) - sum(e[2] for e in inflight)
+                     if "limit" in state else None)
+        if state.get("header_cost"):
+            inflight.append([reservation_id, now, state["header_cost"]])
+        state["inflight"] = inflight
+        charge_window = bool(state.get("window_cost") and state.get("window_limit"))
+        if charge_window:
+            state["window_used"] = _learned_used(state, now) + state["window_cost"]
+            state["window_used_at"] = now
+        state["version"] = state.get("version", 0) + 1
+        return {"id": reservation_id, "window": charge_window, "available": available}
+
+    return _store_call("update", model, reserve)
 
 
-def _record_token_budget(model: str, response, available_at_send: float | None,
-                         sent_at: float) -> None:
-    with _budget_lock:
-        state = _token_budget.setdefault(model, {})
+def _release_reservation(model: str, reservation: dict | None) -> None:
+    """Drops a reservation whose request never got a response."""
+    if reservation is None:
+        return
+
+    def release(state: dict) -> None:
+        state["inflight"] = [e for e in state.get("inflight", []) if e[0] != reservation["id"]]
+        state["version"] = state.get("version", 0) + 1
+
+    _store_call("update", model, release)
+
+
+def _record_token_budget(model: str, response, reservation: dict | None, sent_at: float) -> None:
+    available_at_send = reservation["available"] if reservation else None
+
+    def record(state: dict) -> None:
+        state["version"] = state.get("version", 0) + 1
+        if reservation:
+            state["inflight"] = [e for e in state.get("inflight", []) if e[0] != reservation["id"]]
 
         if response.status_code == 429:
             # Groq naming the limit this request broke, how full it is, and
@@ -158,7 +313,7 @@ def _record_token_budget(model: str, response, available_at_send: float | None,
             match = _LIMIT_IN_429.search(response.text or "")
             if match:
                 limit, used, requested = (int(g) for g in match.groups())
-                now = time.monotonic()
+                now = _now()
                 if not state.get("window_cost"):
                     # First sight of this limit. "Requested" is Groq's
                     # up-front estimate; what it actually charged shows in
@@ -170,10 +325,14 @@ def _record_token_budget(model: str, response, available_at_send: float | None,
                 else:
                     state["window_cost"] = max(state["window_cost"], requested)
                 state["window_limit"] = min(limit, state.get("window_limit") or limit)
+                # Groq's "Used" is authoritative: it already counts every
+                # process's requests, so it replaces any reservations.
                 state["window_used"], state["window_used_at"] = used, now
                 state.pop("unpriced", None)
         elif response.status_code == 200:
-            if state.get("window_cost"):
+            if reservation and reservation["window"]:
+                pass  # already charged to the learned bucket when reserved
+            elif state.get("window_cost"):
                 state["window_used"] = _learned_used(state, sent_at) + state["window_cost"]
                 state["window_used_at"] = sent_at
             else:
@@ -189,8 +348,10 @@ def _record_token_budget(model: str, response, available_at_send: float | None,
             spent = available_at_send - remaining
             if spent > 0:
                 state["header_cost"] = spent
-        state.update(limit=limit, remaining=remaining, at=time.monotonic(),
+        state.update(limit=limit, remaining=remaining, at=_now(),
                      full_in=_parse_duration(headers.get("x-ratelimit-reset-tokens")) or 0.0)
+
+    _store_call("update", model, record)
 
 
 def _retry_after_seconds(response) -> float:
@@ -203,7 +364,9 @@ def _retry_after_seconds(response) -> float:
 
 
 def _call_groq(model: str, system_prompt: str, user_prompt: str, json_mode: bool = True,
-                temperature: float = 0.2) -> str:
+                temperature: float = 0.2, **options) -> str:
+    """`options` go into the payload as-is (e.g. reasoning_effort,
+    max_completion_tokens)."""
     payload = {
         "model": model,
         "messages": [
@@ -214,16 +377,48 @@ def _call_groq(model: str, system_prompt: str, user_prompt: str, json_mode: bool
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
+    payload.update(options)
     return _post_chat(payload)
 
 
-def _post_chat(payload: dict, timeout: int = 30) -> str:
+def _read_stream(response, on_text) -> str:
+    """
+    Reads a streamed (server-sent events) completion, calling
+    on_text(text_so_far) as content arrives, and returns the full text.
+    Reasoning models stream their reasoning in a separate "reasoning"
+    field first; only "content" is the answer.
+    """
+    text = ""
+    for line in response.iter_lines(decode_unicode=True):
+        if not line or not line.startswith("data:"):
+            continue
+        data = line[len("data:"):].strip()
+        if data == "[DONE]":
+            break
+        try:
+            delta = json.loads(data)["choices"][0].get("delta", {})
+        except (ValueError, KeyError, IndexError):
+            continue
+        piece = delta.get("content")
+        if piece:
+            text += piece
+            on_text(text)
+    return text
+
+
+def _post_chat(payload: dict, timeout: int = 30, on_text=None) -> str:
     """
     Sends one chat-completions payload and returns the reply text, with
     the retry/error handling every Groq call shares. Split out of
     _call_groq so describe_figure can send multi-part (text + image)
     messages through the same path.
+
+    With `on_text`, the reply is streamed: on_text(text_so_far) is called
+    as it arrives (rate-limit and error handling are unchanged -- those are
+    decided by the status code, before any of the body is read).
     """
+    if on_text is not None:
+        payload = {**payload, "stream": True}
     if not GROQ_API_KEY:
         raise GroqNotConfigured(
             "GROQ_API_KEY is not set. Get a free key at console.groq.com/keys "
@@ -237,18 +432,23 @@ def _post_chat(payload: dict, timeout: int = 30) -> str:
     while attempt < MAX_RETRIES:
         attempt += 1
         try:
-            available_at_send = _wait_for_token_budget(model)
-            sent_at = time.monotonic()
-            response = requests.post(
-                GROQ_ENDPOINT,
-                headers={
-                    "Authorization": f"Bearer {GROQ_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=timeout,
-            )
-            _record_token_budget(model, response, available_at_send, sent_at)
+            reservation = _wait_for_token_budget(model)
+            sent_at = _now()
+            try:
+                response = requests.post(
+                    GROQ_ENDPOINT,
+                    headers={
+                        "Authorization": f"Bearer {GROQ_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=timeout,
+                    stream=on_text is not None,
+                )
+            except Exception:
+                _release_reservation(model, reservation)
+                raise
+            _record_token_budget(model, response, reservation, sent_at)
             if response.status_code == 413:
                 # Groq's own message says which limit was hit (e.g. "Request
                 # too large ... on tokens per minute (TPM): Limit 8000,
@@ -273,7 +473,21 @@ def _post_chat(payload: dict, timeout: int = 30) -> str:
                 progress.detail(f"Rate-limited by Groq -- retrying in {wait:.0f}s")
                 time.sleep(wait)
                 continue
-            response.raise_for_status()
+            if response.status_code >= 400:
+                # Keep Groq's own explanation -- a bare "400 Bad Request"
+                # says nothing about which limit or rule was broken.
+                if response.status_code == 400 and "json_validate_failed" in (response.text or ""):
+                    raise GroqJSONGenerationFailed(
+                        f"Groq could not produce valid JSON for model '{model}': {response.text[:500]}",
+                        response=response,
+                    )
+                try:
+                    response.raise_for_status()
+                except requests.HTTPError as exc:
+                    raise requests.HTTPError(f"{exc} -- Groq said: {(response.text or '')[:500]}",
+                                             response=response) from None
+            if on_text is not None:
+                return _read_stream(response, on_text)
             return response.json()["choices"][0]["message"]["content"]
 
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
@@ -663,6 +877,31 @@ def fit_chunks_to_budget(chunks: list[dict], max_tokens: int = GROQ_MAX_CONTEXT_
     return [c for i, c in enumerate(chunks) if i in kept]
 
 
+_CITATION_MARKER = re.compile(r"\[(\d+(?:\s*[-–,]\s*\d+)*)\]")
+
+
+def cited_indices(report_text: str, num_sources: int) -> list[int]:
+    """Every source index the report's [n] / [1, 3] / [2-4] markers cite,
+    in first-cited order."""
+    seen: list[int] = []
+    for body in _CITATION_MARKER.findall(report_text or ""):
+        for part in re.split(r"\s*,\s*", body):
+            bounds = [int(b) for b in re.split(r"\s*[-–]\s*", part) if b.isdigit()]
+            numbers = range(bounds[0], bounds[-1] + 1) if len(bounds) == 2 and 0 < bounds[1] - bounds[0] < 20 else bounds
+            for n in numbers:
+                if 1 <= n <= num_sources and n not in seen:
+                    seen.append(n)
+    return seen
+
+
+def citations_for(report_text: str, chunks: list[dict]) -> list[str]:
+    """The source labels a report actually cites, read off its markers."""
+    return [chunks[i - 1]["source_label"] for i in cited_indices(report_text, len(chunks))]
+
+
+DRAFT_UPDATE_SECONDS = 0.75
+
+
 def generate_report(chunks: list[dict], instructions: str) -> dict:
     """
     chunks: list of {"text": ..., "source_label": ..., "source_type": ...}
@@ -670,6 +909,12 @@ def generate_report(chunks: list[dict], instructions: str) -> dict:
             "paper.pdf, page 3" or "Page Title, https://...")
 
     Returns {"report_text": str, "citations_used": [source_label, ...]}
+
+    The report is streamed: progress.draft() receives the text written so
+    far (at most every DRAFT_UPDATE_SECONDS), which the UI shows while the
+    run is still going. Plain text rather than JSON mode, so the stream is
+    readable as it arrives -- the cited sources are read off the [n]
+    markers in the text, which is also what the entailment check reads.
     """
     numbered_context = "\n\n".join(
         f"[{i+1}] Source: {c['source_label']}\n{c['text']}"
@@ -681,22 +926,261 @@ def generate_report(chunks: list[dict], instructions: str) -> dict:
         "excerpts provided, write a report that follows the user's "
         "instructions. Every factual claim must be followed by a citation "
         "marker like [1] or [2] referring to the source excerpt it came "
-        "from. Do not invent facts not present in the sources. Respond ONLY "
-        'with JSON: {"report_text": "...", "citations_used": [1, 2, ...]} '
-        "where citations_used lists every source index you actually cited."
+        "from. Do not invent facts not present in the sources.\n"
+        # The entailment check's two most common findings on real reports:
+        # a source described from its title alone ("provides a
+        # comprehensive overview") and a cited sentence padded with
+        # details from a different excerpt.
+        "Each sentence may only say what the excerpt(s) it cites actually "
+        "state. Never describe a source's scope, purpose, findings or "
+        "structure beyond what its excerpt shows -- a title or author list "
+        "alone supports only the title and authors. Do not attach details "
+        "from one excerpt to a citation of another: if a sentence combines "
+        "facts from several excerpts, cite each one, or split the sentence. "
+        "If the excerpts don't cover something the instructions ask for, "
+        "say so rather than filling the gap.\n"
+        "Respond with the report text only: no preamble, no closing remarks, "
+        "no JSON, no list of sources at the end (the [n] markers are the citations)."
     )
     user_prompt = f"Instructions: {instructions}\n\nSource excerpts:\n{numbered_context}"
 
-    raw = _call_groq(GROQ_GENERATION_MODEL, system_prompt, user_prompt, json_mode=True)
-    parsed = json.loads(raw)
+    last_sent = [0.0]
 
-    cited_indices = parsed.get("citations_used", [])
-    citations_used = [
-        chunks[i - 1]["source_label"] for i in cited_indices
-        if 1 <= i <= len(chunks)
-    ]
+    def on_text(text_so_far: str) -> None:
+        now = time.monotonic()
+        if now - last_sent[0] >= DRAFT_UPDATE_SECONDS:
+            last_sent[0] = now
+            progress.draft(text_so_far)
 
-    return {
-        "report_text": parsed.get("report_text", ""),
-        "citations_used": citations_used,
+    payload = {
+        "model": GROQ_GENERATION_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.2,
     }
+    # A long report can take a while to finish; the timeout is per read,
+    # and tokens keep arriving throughout.
+    report_text = _post_chat(payload, timeout=60, on_text=on_text).strip()
+    progress.draft(report_text)
+    return {"report_text": report_text, "citations_used": citations_for(report_text, chunks)}
+
+
+def _excerpts_within(chunks: list[dict], max_tokens: int) -> list[str]:
+    """Each chunk's text, cut to an equal share of `max_tokens` only if
+    they don't all fit whole."""
+    if sum(_estimate_tokens(c["text"]) for c in chunks) <= max_tokens:
+        return [c["text"] for c in chunks]
+    share_chars = max(200, max_tokens * 4 // max(1, len(chunks)))
+    return [c["text"][:share_chars] for c in chunks]
+
+
+def plan_follow_up(instructions: str, evidence: list[dict], tried_queries: list[str],
+                   max_tokens: int = MULTI_HOP_EVIDENCE_TOKENS) -> dict:
+    """
+    One step of iterative multi-hop retrieval: reads the evidence retrieved
+    so far and decides whether answering `instructions` needs a fact the
+    evidence POINTS TO but doesn't contain -- the bridge in "what dataset did
+    the method that beat the 2019 baseline use?" is the method's name, which
+    only the first hop's results reveal. If so, returns follow-up search
+    queries that name that thing, so the next hop can look it up.
+
+    Returns {"complete": bool, "missing": str, "queries": [str, ...]}.
+    complete=True (and no queries) on any failure or without a key, so a
+    planner problem just ends the hop loop instead of failing the run.
+    """
+    done = {"complete": True, "missing": "", "queries": []}
+    if not GROQ_API_KEY or not evidence:
+        return done
+
+    excerpts = "\n\n".join(
+        f"[{i + 1}] {c.get('source_label', '')}\n{text}"
+        for i, (c, text) in enumerate(zip(evidence, _excerpts_within(evidence, max_tokens)))
+    )
+    tried = "\n".join(f"- {q}" for q in tried_queries)
+    system_prompt = (
+        "You plan document retrieval for a research question, one hop at a time. "
+        "Given the question and the evidence retrieved so far, decide whether the "
+        "question can be answered from this evidence. If answering it needs a fact "
+        "that the evidence points to but does not contain -- for example the "
+        "evidence names a method, dataset, model, author or result, and the "
+        "question needs a further fact ABOUT that named thing -- write 1-2 short "
+        "search queries (under 15 words) that use the exact name from the "
+        "evidence. Do not repeat or reword the queries already tried. If the "
+        "evidence already suffices, or further searching would not help, set "
+        'complete to true. Respond ONLY with JSON: {"complete": true or false, '
+        '"missing": "what is still missing, or empty", "queries": ["..."]}, no extra text.'
+    )
+    user_prompt = (f"Question: {instructions}\n\nQueries already tried:\n{tried}\n\n"
+                   f"Evidence so far:\n{excerpts}")
+    try:
+        # temperature=0 -- this decides whether (and what) to retrieve next,
+        # a routing decision like classify_intent/decompose_query.
+        parsed = json.loads(_call_groq(GROQ_FILTER_MODEL, system_prompt, user_prompt,
+                                       json_mode=True, temperature=0))
+    except Exception:
+        return done
+    tried_lower = {q.strip().lower() for q in tried_queries}
+    queries = [q.strip() for q in parsed.get("queries", []) if isinstance(q, str) and q.strip()
+               and q.strip().lower() not in tried_lower][:2]
+    complete = bool(parsed.get("complete", True)) or not queries
+    return {"complete": complete, "missing": str(parsed.get("missing", "") or ""),
+            "queries": [] if complete else queries}
+
+
+_VERDICTS = ("supported", "unsupported", "contradicted")
+
+
+def _pack_claim_batches(claims: list[dict], chunks: list[dict], max_tokens: int) -> list[list[int]]:
+    """
+    Groups claim indices so each batch's distinct cited excerpts fit
+    `max_tokens`. Claims citing the same excerpts share a batch for free,
+    so a report built from a handful of excerpts is usually one request.
+    """
+    batches: list[list[int]] = []
+    batch: list[int] = []
+    batch_sources: set[int] = set()
+    for ci, claim in enumerate(claims):
+        sources = set(claim["sources"])
+        combined = batch_sources | sources
+        cost = sum(_estimate_tokens(chunks[i - 1]["text"]) for i in combined)
+        if batch and cost > max_tokens:
+            batches.append(batch)
+            batch, batch_sources = [], set()
+            combined = sources
+        batch.append(ci)
+        batch_sources = combined
+    if batch:
+        batches.append(batch)
+    return batches
+
+
+def judge_claims(claims: list[dict], chunks: list[dict],
+                 max_tokens: int = ENTAILMENT_MAX_SOURCE_TOKENS) -> list[dict]:
+    """
+    Entailment check: for each claim ({"text": sentence, "sources": [cited
+    1-based indices into `chunks`]}), asks an LLM judge whether the excerpts
+    it cites actually SUPPORT what it says -- catching a report that cites
+    the right source but misstates it, which vocabulary-overlap
+    groundedness can't.
+
+    Returns one {"claim", "sources", "verdict", "reason"} per claim, in
+    order; verdict is "supported", "unsupported", "contradicted", or
+    "unjudged" when the judge skipped it. Raises on request failures --
+    the caller decides how a check that couldn't run is reported.
+    """
+    results = [{"claim": c["text"], "sources": c["sources"], "verdict": "unjudged", "reason": ""}
+                for c in claims]
+    system_prompt = (
+        "You check whether sentences from a generated research report are faithful "
+        "to the source excerpts they cite. For each numbered claim, judge it ONLY "
+        "against the excerpts it cites:\n"
+        '"supported": the cited excerpts state or directly imply everything the claim says.\n'
+        '"unsupported": the claim adds, overstates, or changes something the cited '
+        "excerpts don't say (including wrong numbers, wrong attribution, or a "
+        "stronger conclusion than the source draws).\n"
+        '"contradicted": the cited excerpts say the opposite.\n'
+        "Be strict about numbers and attributions, lenient about paraphrase. "
+        'Respond ONLY with JSON: {"verdicts": [{"claim": 1, "verdict": "supported", '
+        '"reason": "one short sentence"}, ...]} with one entry per claim, no extra text.'
+    )
+    pending = _pack_claim_batches(claims, chunks, max_tokens)
+    while pending:
+        batch = pending.pop(0)
+        source_ids = sorted({i for ci in batch for i in claims[ci]["sources"]})
+        texts = _excerpts_within([chunks[i - 1] for i in source_ids], max_tokens)
+        excerpts = "\n\n".join(f"[{i}] {text}" for i, text in zip(source_ids, texts))
+        listing = "\n".join(
+            f"{n + 1}. (cites {', '.join(f'[{i}]' for i in claims[ci]['sources'])}) {claims[ci]['text']}"
+            for n, ci in enumerate(batch)
+        )
+        user_prompt = f"Source excerpts:\n{excerpts}\n\nClaims:\n{listing}"
+        try:
+            # temperature=0 -- a judgement that feeds a pass/fail check.
+            # The judge is a reasoning model, and its reasoning tokens come
+            # out of the same completion budget as the JSON: at Groq's
+            # default it can think through the whole budget and return
+            # truncated JSON (claims left unjudged) or none at all (400
+            # json_validate_failed). Low effort + an explicit budget keeps
+            # room for the answer.
+            parsed = json.loads(_call_groq(
+                GROQ_JUDGE_MODEL, system_prompt, user_prompt, json_mode=True, temperature=0,
+                reasoning_effort="low", max_completion_tokens=ENTAILMENT_MAX_COMPLETION_TOKENS,
+            ))
+        except (GroqJSONGenerationFailed, json.JSONDecodeError):
+            # Still too much to answer in one go: judge each half
+            # separately. A single claim that fails stays "unjudged".
+            if len(batch) > 1:
+                half = len(batch) // 2
+                pending[:0] = [batch[:half], batch[half:]]
+            continue
+        for entry in parsed.get("verdicts", []):
+            if not isinstance(entry, dict):
+                continue
+            try:
+                n = int(entry.get("claim")) - 1
+            except (TypeError, ValueError):
+                continue
+            verdict = str(entry.get("verdict", "")).strip().lower()
+            if 0 <= n < len(batch) and verdict in _VERDICTS:
+                results[batch[n]].update(verdict=verdict, reason=str(entry.get("reason", "") or ""))
+    return results
+
+
+
+def revise_claims(flagged: list[dict], chunks: list[dict],
+                  max_tokens: int = ENTAILMENT_MAX_SOURCE_TOKENS) -> list[dict | None]:
+    """
+    Targeted revision: rewrites ONLY the sentences the entailment check
+    flagged, each against the excerpts it cites, instead of regenerating
+    the whole report. flagged: [{"claim", "sources", "reason"}].
+
+    Returns one entry per flagged sentence, in order: {"action": "rewrite",
+    "text": new sentence} (keeping as much as its excerpts support),
+    {"action": "remove"} when they support none of it, or None if the model
+    skipped it. Raises on request failures -- the pipeline then keeps the
+    report as it was.
+    """
+    source_ids = sorted({i for item in flagged for i in item["sources"]})
+    texts = _excerpts_within([chunks[i - 1] for i in source_ids], max_tokens)
+    excerpts = "\n\n".join(f"[{i}] {text}" for i, text in zip(source_ids, texts))
+    listing = "\n".join(
+        f"{n + 1}. (cites {', '.join(f'[{i}]' for i in item['sources'])}) {item['claim']}\n"
+        f"   Problem: {item.get('reason') or 'not supported by the cited excerpts'}"
+        for n, item in enumerate(flagged)
+    )
+    system_prompt = (
+        "You fix sentences in a research report that a fact-checker flagged as not "
+        "supported by the source excerpts they cite. Rewrite each flagged sentence so "
+        "it states ONLY what its cited excerpts actually say: keep as much of the "
+        "original wording and meaning as the excerpts support, drop or correct the "
+        "rest, keep it a single sentence, and do not add citation markers. If the "
+        "cited excerpts support nothing in the sentence, remove it instead.\n"
+        'Respond ONLY with JSON: {"revisions": [{"sentence": 1, "action": "rewrite", '
+        '"text": "..."}, {"sentence": 2, "action": "remove"}, ...]} with one entry per '
+        "sentence, no extra text."
+    )
+    user_prompt = f"Source excerpts:\n{excerpts}\n\nFlagged sentences:\n{listing}"
+    # temperature=0 and low reasoning effort, for the same reasons as the
+    # judge: a reasoning model must leave room in its budget for the answer.
+    parsed = json.loads(_call_groq(
+        GROQ_GENERATION_MODEL, system_prompt, user_prompt, json_mode=True, temperature=0,
+        reasoning_effort="low", max_completion_tokens=ENTAILMENT_MAX_COMPLETION_TOKENS,
+    ))
+    results: list[dict | None] = [None] * len(flagged)
+    for entry in parsed.get("revisions", []):
+        if not isinstance(entry, dict):
+            continue
+        try:
+            n = int(entry.get("sentence")) - 1
+        except (TypeError, ValueError):
+            continue
+        action = str(entry.get("action", "")).strip().lower()
+        if not 0 <= n < len(flagged):
+            continue
+        if action == "remove":
+            results[n] = {"action": "remove"}
+        elif action == "rewrite" and isinstance(entry.get("text"), str) and entry["text"].strip():
+            results[n] = {"action": "rewrite", "text": entry["text"].strip()}
+    return results

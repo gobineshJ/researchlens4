@@ -1,0 +1,27 @@
+Deployment Report: Assisted Diagnosis Coding at St. Aurelia Hospital
+
+Prepared by the Clinical Informatics Office, St. Aurelia Hospital, March 2025
+
+Summary
+
+Between June and December 2024, St. Aurelia Hospital ran a six-month pilot of an assisted diagnosis coding tool in its medical records department. The tool used the HelixNet model, fine-tuned on 40,000 of the hospital's own discharge summaries, to suggest diagnosis codes that human coders then accepted, edited or rejected. Over the pilot, the average time a coder spent on one discharge summary fell by 31 percent, from 13 minutes to 9 minutes.
+
+Setup
+
+The model ran on a single on-premises server with two NVIDIA T4 GPUs, inside the hospital network, so that no patient data left the hospital. Suggestions appeared in the existing coding software as a ranked list, with the five most likely codes shown first. Coders were told that the suggestions were optional and that they remained responsible for the final codes.
+
+Results
+
+Twelve coders took part. Agreement between the codes suggested by the tool and the final codes chosen by coders reached a Cohen's kappa of 0.82 by the end of the pilot. Coders accepted at least one suggested code for 88 percent of summaries. The audit team found no increase in coding errors compared with the six months before the pilot.
+
+Problems observed
+
+Several problems appeared during the pilot. The tool performed noticeably worse on paediatric discharge summaries, where coders accepted suggestions for only 61 percent of summaries. Coders also reported that the tool sometimes suggested codes for conditions that had been ruled out later in the same note. Finally, three coders said they had started to accept the top suggestion without reading the full summary when they were busy, which the department considers a serious risk of over-reliance.
+
+Licensing review
+
+Before the pilot, the hospital's legal team reviewed the licence of the data used to pre-train the model. Because the hospital does not sell the tool or charge for its use, the legal team concluded that internal, non-commercial use was permitted.
+
+Recommendations
+
+The Clinical Informatics Office recommends continuing the tool for adult inpatient summaries, adding a warning when a suggested code is contradicted later in the note, and running monthly spot checks of summaries where the top suggestion was accepted unchanged. Paediatric summaries should be excluded until the model has been evaluated on more paediatric data.

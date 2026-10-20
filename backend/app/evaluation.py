@@ -9,7 +9,7 @@ brief's evaluation panel:
                   see evaluate_retrieval; not run automatically on a
                   live request since there's no ground truth for an
                   arbitrary user query)
-    Generation -> Groundedness + Citation Accuracy
+    Generation -> Groundedness + Citation Accuracy + Entailment (LLM judge)
     System     -> Processing Time + Error Rate
 
 An EvaluationReport instance is built up across one /process run and
@@ -18,8 +18,10 @@ work correctly" is a real answer, not an assumption.
 """
 
 import json
+import re
 import time
 import uuid
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,7 +31,7 @@ from . import chunker, progress
 from .config import (
     CHUNK_SIZE_WORDS, CHUNK_OVERLAP_RATIO, CRAWL_MAX_DEPTH, CRAWL_SAME_DOMAIN_ONLY,
     RERANK_SCORE_WARNING_THRESHOLD, EVALUATION_LOG_PATH, GROUNDEDNESS_THRESHOLD,
-    GROQ_MAX_CONTEXT_TOKENS,
+    GROQ_MAX_CONTEXT_TOKENS, ENTAILMENT_THRESHOLD,
 )
 
 
@@ -480,6 +482,181 @@ def validate_generation(report_text: str, citations_used: list[str], retrieved_c
         )
 
 
+# ---------- Entailment (claim-level faithfulness) ----------
+# Groundedness above is vocabulary overlap -- it can't tell "the method
+# improved accuracy by 4%" from "the method improved accuracy by 40%" when
+# both use the source's words. The entailment check judges each cited
+# sentence against the excerpt(s) it cites (groq_client.judge_claims); the
+# claims themselves are pulled out of the report here.
+
+_CITATION_MARKER = re.compile(r"\[(\d+(?:\s*[-–,]\s*\d+)*)\]")
+_LEADING_MARKERS = re.compile(r"^(?:\s*\[\d+(?:\s*[-–,]\s*\d+)*\])+")
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+|\n+")
+_ABBREVIATION_END = re.compile(
+    r"(?:\bet\s+al|\be\.g|\bi\.e|\bcf|\bvs|\bFigs?|\bEqs?|\bRefs?|\bNo|\bVol|\bapprox|"
+    r"\bDr|\bProf|\b[A-Z])\.$"
+)
+_MARKDOWN_PREFIX = re.compile(r"^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s*|\|)")
+
+
+def _marker_indices(marker_body: str) -> list[int]:
+    """'1, 3-5' -> [1, 3, 4, 5]."""
+    indices: list[int] = []
+    for part in re.split(r"\s*,\s*", marker_body.strip()):
+        bounds = re.split(r"\s*[-–]\s*", part)
+        if len(bounds) == 2 and bounds[0].isdigit() and bounds[1].isdigit():
+            lo, hi = int(bounds[0]), int(bounds[1])
+            indices.extend(range(lo, hi + 1) if 0 < hi - lo < 20 else [lo, hi])
+        elif part.isdigit():
+            indices.append(int(part))
+    return indices
+
+
+def _sentence_spans(text: str) -> list[list[int]]:
+    """[start, end) offsets of each sentence-like piece of `text`, with
+    pieces ending in an abbreviation ("Rahmani et al.") joined to the next."""
+    spans: list[list[int]] = []
+    previous = 0
+    for match in list(_SENTENCE_BREAK.finditer(text)) + [None]:
+        start, end = previous, (match.start() if match else len(text))
+        if match:
+            previous = match.end()
+        if not text[start:end].strip():
+            continue
+        if spans and _ABBREVIATION_END.search(text[spans[-1][0]:spans[-1][1]]):
+            spans[-1][1] = end
+        else:
+            spans.append([start, end])
+    return spans
+
+
+def clean_claim_text(piece: str) -> str:
+    """A sentence as the judge sees it: no citation markers, no markdown."""
+    text = _MARKDOWN_PREFIX.sub("", _CITATION_MARKER.sub("", piece))
+    text = " ".join(text.replace("|", " ").replace("**", "").split())
+    return re.sub(r"\s+([.,;:!?])", r"\1", text)  # "MIMIC [1]." -> "MIMIC."
+
+
+def extract_cited_claims(report_text: str, num_sources: int, max_claims: int | None = None) -> list[dict]:
+    """
+    Splits the report into sentences and returns the ones carrying [n]
+    citation markers: [{"text": sentence without markers, "sources": [n, ...],
+    "span": [start, end] of the sentence in report_text}]. A marker placed
+    after the full stop ("... improved. [2]") lands at the start of the next
+    piece when split, so it is moved back onto the sentence it belongs to
+    (and inside its span). Indices outside 1..num_sources are dropped
+    (citation_accuracy already reports those). Past `max_claims`, an evenly
+    spaced sample is kept, so the check's cost stays bounded.
+    """
+    text_in = report_text or ""
+    claims: list[dict] = []
+    for start, end in _sentence_spans(text_in):
+        while start < end and text_in[start].isspace():
+            start += 1
+        piece = text_in[start:end]
+        leading = _LEADING_MARKERS.match(piece)
+        if leading and claims:
+            claims[-1]["sources"] += [i for m in _CITATION_MARKER.findall(leading.group(0))
+                                      for i in _marker_indices(m)]
+            claims[-1]["span"][1] = start + leading.end()
+            start += leading.end()
+            while start < end and text_in[start].isspace():
+                start += 1
+            piece = text_in[start:end]
+        sources = [i for m in _CITATION_MARKER.findall(piece) for i in _marker_indices(m)]
+        claims.append({"text": clean_claim_text(piece), "sources": sources, "span": [start, end]})
+
+    seen: set[str] = set()
+    cited = []
+    for claim in claims:
+        sources = sorted({i for i in claim["sources"] if 1 <= i <= num_sources})
+        if not sources or len(claim["text"].split()) < 4 or claim["text"] in seen:
+            continue
+        seen.add(claim["text"])
+        cited.append({"text": claim["text"], "sources": sources, "span": claim["span"]})
+
+    if max_claims and len(cited) > max_claims:
+        step = len(cited) / max_claims
+        cited = [cited[int(i * step)] for i in range(max_claims)]
+    return cited
+
+
+def apply_revisions(report_text: str, revisions: list[dict]) -> str:
+    """
+    Splices revised sentences into the report. Each revision is
+    {"span": [start, end], "action": "rewrite" | "remove", "text": ...}
+    for a sentence found by extract_cited_claims. A rewrite keeps the
+    sentence's original citation markers (re-attached before its final
+    punctuation), so citations can't drift; a removal drops the sentence
+    and its markers.
+    """
+    text = report_text
+    for revision in sorted(revisions, key=lambda r: r["span"][0], reverse=True):
+        start, end = revision["span"]
+        if revision["action"] == "remove":
+            left, right = text[:start], text[end:]
+            if left.endswith(" ") and right.startswith(" "):
+                right = right[1:]
+            text = left + right
+            continue
+        markers = "".join(m.group(0) for m in _CITATION_MARKER.finditer(text[start:end]))
+        sentence = " ".join(_CITATION_MARKER.sub("", revision["text"]).split())
+        sentence = re.sub(r"\s+([.,;:!?])", r"\1", sentence)
+        if markers:
+            if sentence and sentence[-1] in ".!?":
+                sentence = f"{sentence[:-1]} {markers}{sentence[-1]}"
+            else:
+                sentence = f"{sentence} {markers}"
+        text = text[:start] + sentence + text[end:]
+    return text.strip()
+
+
+def validate_entailment(claims: list[dict], verdicts: list[dict], report: EvaluationReport):
+    """
+    Fails when fewer than ENTAILMENT_THRESHOLD of the judged claims are
+    supported by the excerpts they cite, or when any claim contradicts its
+    source -- a contradiction is never an acceptable rate. Claims the judge
+    skipped ("unjudged") count toward neither side.
+    """
+    stage = "generation"
+    if not claims:
+        report.add_check(
+            stage, "entailment", False,
+            "No sentence in the report carries a citation marker, so no claim could be "
+            "checked against the source it cites.",
+        )
+        return
+
+    counts = Counter(v["verdict"] for v in verdicts)
+    judged = counts["supported"] + counts["unsupported"] + counts["contradicted"]
+    if not judged:
+        report.add_check(stage, "entailment", False,
+                         f"The judge returned no usable verdict for any of {len(claims)} claim(s)."
+                         if not counts["removed"] else
+                         f"Every flagged claim was removed by revision; no remaining cited claim was judged.")
+        return
+
+    rate = counts["supported"] / judged
+    passed = rate >= ENTAILMENT_THRESHOLD and counts["contradicted"] == 0
+    problems = [v for v in verdicts if v["verdict"] in ("contradicted", "unsupported")]
+    problems.sort(key=lambda v: v["verdict"] != "contradicted")  # contradictions first
+    examples = "; ".join(
+        f"{v['verdict'].upper()}: \"{v['claim'][:120]}{'...' if len(v['claim']) > 120 else ''}\" "
+        f"{''.join(f'[{i}]' for i in v['sources'])}" + (f" -- {v['reason']}" if v["reason"] else "")
+        for v in problems[:3]
+    )
+    report.add_check(
+        stage, "entailment", passed,
+        f"{counts['supported']} of {judged} cited claim(s) are supported by the excerpt(s) they cite "
+        f"({rate:.0%}, threshold {ENTAILMENT_THRESHOLD:.0%}); {counts['unsupported']} unsupported, "
+        f"{counts['contradicted']} contradicted"
+        + (f", {counts['unjudged']} not judged" if counts["unjudged"] else "")
+        + (f", {counts['removed']} removed by revision" if counts["removed"] else "") + "."
+        + (f" {examples}" if examples else ""),
+        value=round(rate * 100, 1),
+    )
+
+
 # ---------- PDF export ----------
 # This replaces an earlier, misdirected check that scanned the RAW extracted
 # document text for typographic punctuation. That was checking the wrong
@@ -514,7 +691,8 @@ def validate_pdf_encoding_safety(sanitized_report_text: str, sanitized_citations
 # actual /process response.
 
 def append_run_to_log(report: "EvaluationReport", run_id: str | None = None,
-                       instructions: str = "", log_path: str | None = None) -> None:
+                       instructions: str = "", log_path: str | None = None,
+                       username: str | None = None) -> None:
     # Resolved at call time, not as a default argument: a default is fixed
     # when the module loads, so tests could not redirect it -- and every
     # test run wrote into the real Run history.
@@ -523,6 +701,9 @@ def append_run_to_log(report: "EvaluationReport", run_id: str | None = None,
     summary = report.to_dict()
     entry = {
         "run_id": run_id,
+        # Who ran it -- read_run_history only shows a user their own runs,
+        # since instructions and check details describe their documents.
+        "username": username,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "instructions": instructions,
         "summary": summary["summary"],
@@ -541,12 +722,17 @@ def append_run_to_log(report: "EvaluationReport", run_id: str | None = None,
         pass  # logging must never break the actual response
 
 
-def read_run_history(log_path: str | None = None, limit: int = 50) -> list[dict]:
+def read_run_history(log_path: str | None = None, limit: int = 50,
+                     username: str | None = None) -> list[dict]:
     """
     Reads the evaluation log back out, newest first, for comparison
     across runs. Returns [] if the log doesn't exist yet (first run
     hasn't happened) rather than raising -- an empty history is a
     normal, expected state, not an error.
+
+    With `username`, only that user's runs are returned. Entries written
+    before runs recorded their user have no "username" and so match
+    nobody -- hidden rather than shown to everyone.
     """
     path = Path(log_path or EVALUATION_LOG_PATH)
     if not path.exists():
@@ -559,8 +745,10 @@ def read_run_history(log_path: str | None = None, limit: int = 50) -> list[dict]
             if not line:
                 continue
             try:
-                entries.append(json.loads(line))
+                entry = json.loads(line)
             except json.JSONDecodeError:
                 continue  # skip a corrupted line rather than failing the whole read
+            if username is None or entry.get("username") == username:
+                entries.append(entry)
     entries.reverse()  # newest first
     return entries[:limit]

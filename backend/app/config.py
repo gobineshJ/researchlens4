@@ -52,6 +52,15 @@ CRAWL_MAX_PAGES = 15
 CRAWL_SAME_DOMAIN_ONLY = True
 REQUEST_TIMEOUT = 8
 USER_AGENT = "ResearchLens-Bot/0.1 (training project; respects robots.txt)"
+CRAWL_RESPECT_ROBOTS_TXT = os.getenv("CRAWL_RESPECT_ROBOTS_TXT", "true").lower() in ("1", "true", "yes")
+# The user-agent above makes a promise; this keeps it. Every fetch (crawl
+# discovery and full scrape alike) is checked against the site's
+# robots.txt first, and a Crawl-delay is honoured between requests to the
+# same site. Only turn it off for sites you own.
+ROBOTS_MAX_CRAWL_DELAY_SECONDS = 10
+# A Crawl-delay longer than this is treated as "don't crawl this site"
+# (pages are skipped) rather than stalling a worker for minutes.
+ROBOTS_CACHE_SECONDS = 3600
 
 # --- Chunking ---
 CHUNK_SIZE_WORDS = 650
@@ -137,8 +146,63 @@ RERANK_SCORE_WARNING_THRESHOLD = 0.0
 # trained input length, keeps scores in the regime the 0.0 threshold
 # actually means something in.
 RERANK_SNIPPET_CHARS = 400
+RERANK_STRIP_BOILERPLATE = True
+# On real academic PDFs a chunk's first RERANK_SNIPPET_CHARS are often a
+# running page header ("arXiv:2101.00001v2 [cs.CL] ..."), a figure caption
+# or a row of table numbers -- and that is what the cross-encoder then
+# scores. With this on, those are stripped before the snippet is taken
+# (reranker._scoring_snippet). The full chunk text is unaffected.
+
+# --- Iterative multi-hop retrieval ---
+MULTI_HOP_ENABLED = os.getenv("MULTI_HOP_ENABLED", "true").lower() in ("1", "true", "yes")
+MULTI_HOP_MAX_EXTRA_HOPS = 2
+# After the first retrieval pass ("targeted_qa"/"analysis" only), Groq reads
+# the evidence found so far and decides whether the question needs a fact
+# the evidence POINTS TO but doesn't contain (e.g. it names the method that
+# beat a baseline, and the question asks which dataset that method used).
+# If so, it writes follow-up queries naming that thing, and they are
+# retrieved as the next hop. At most this many follow-up hops per attempt;
+# each costs one small Groq call plus one retrieval pass.
+MULTI_HOP_EVIDENCE_TOKENS = 3000
+# How much of the evidence-so-far the hop planner gets to read, split
+# evenly across the retrieved chunks.
+
+# --- Entailment (claim-level faithfulness) ---
+ENTAILMENT_CHECK_ENABLED = os.getenv("ENTAILMENT_CHECK_ENABLED", "true").lower() in ("1", "true", "yes")
+GROQ_JUDGE_MODEL = GROQ_FILTER_MODEL
+ENTAILMENT_THRESHOLD = 0.7
+# Groundedness above is vocabulary overlap: a report can reuse a source's
+# words while misstating what it says and still pass. The entailment check
+# asks an LLM judge, for each sentence that carries a citation marker,
+# whether the excerpt it cites actually supports it. It fails when fewer
+# than this share of the judged claims are supported, or when any claim
+# contradicts its source.
+CLAIM_REVISION_ENABLED = os.getenv("CLAIM_REVISION_ENABLED", "true").lower() in ("1", "true", "yes")
+# When the entailment check flags sentences, rewrite ONLY those sentences
+# against the excerpts they cite (or remove them if nothing supports them),
+# then judge the rewrites again. One generation call plus one judge call,
+# and the rest of the report is left exactly as written. The flagged
+# originals stay visible in the UI's Claim check.
+ENTAILMENT_MAX_CLAIMS = 25
+# Longer reports are sampled evenly, so the check's cost stays bounded.
+ENTAILMENT_MAX_SOURCE_TOKENS = 3000
+# Cited excerpts sent per judging request. Claims are packed into as few
+# requests as fit; a claim whose cited excerpts alone exceed this gets them
+# truncated.
+ENTAILMENT_MAX_COMPLETION_TOKENS = 3000
+# Room for the judge's reasoning AND its JSON answer. Groq counts this
+# against the per-minute limit up front (8000 TPM for gpt-oss-20b on the
+# free tier), so excerpts + claims + this must stay well under 8000.
 
 # --- ChromaDB ---
+CHROMA_MODE = os.getenv("CHROMA_MODE", "ephemeral").lower()
+# "ephemeral" (default): each run's vectors live in memory and are dropped
+# when the run ends. Every run builds a fresh collection and nothing ever
+# reads an old one, so there is nothing worth keeping on disk -- and an
+# on-disk store is shared by every worker process, which ChromaDB doesn't
+# support writing to concurrently. "persistent": collections are written to
+# CHROMA_PERSIST_DIR (useful to inspect a run's index while debugging) and
+# still deleted when the run ends.
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_store")
 CHROMA_COLLECTION_NAME = "researchlens"
 
@@ -161,7 +225,23 @@ JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "")
 # key is generated at startup (see auth.py), which works but logs every
 # user out whenever the API restarts.
 JWT_ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
+# Short on purpose: the browser keeps the access token only in memory and
+# silently swaps it for a new one via the refresh cookie (POST /auth/refresh).
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+# Refresh tokens live in an httpOnly cookie (scripts -- including injected
+# ones -- can't read it), are stored hashed in AUTH_DB_PATH, and rotate on
+# every use: presenting an already-used one revokes that whole login.
+REFRESH_COOKIE_NAME = "researchlens_refresh"
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() in ("1", "true", "yes")
+# Set true whenever the app is served over HTTPS, so the cookie is never
+# sent over plain HTTP. Must stay false for http://localhost development.
+CORS_ORIGINS = [o.strip() for o in os.getenv(
+    "CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if o.strip()]
+# Browser origins allowed to call the API directly. The frontend normally
+# goes through a same-origin /api proxy (Vite in development, nginx in
+# Docker), which needs no CORS at all; this list only matters when the
+# frontend is pointed straight at the API (VITE_API_BASE).
 AUTH_DB_PATH = os.getenv("AUTH_DB_PATH", "./researchlens.db")
 # SQLite file holding user accounts and which user submitted which job.
 ALLOW_REGISTRATION = os.getenv("ALLOW_REGISTRATION", "true").lower() in ("1", "true", "yes")
@@ -175,6 +255,19 @@ CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER", "false").lower(
 # true = run the pipeline inside the API process instead of on a worker,
 # so the app still works without Redis or a worker running. /process then
 # blocks until the report is done, exactly like before Celery was added.
+CELERY_WORKER_CONCURRENCY = int(os.getenv("CELERY_WORKER_CONCURRENCY", "2"))
+# Pipeline runs one worker process can execute at once on Linux/macOS/WSL
+# (prefork pool). Each process loads its own embedding + reranker models,
+# so this is bounded by RAM more than by CPU. Ignored on native Windows,
+# where only the solo pool works (one run at a time per worker).
+GROQ_RATE_LIMIT_REDIS_URL = os.getenv(
+    "GROQ_RATE_LIMIT_REDIS_URL", "" if CELERY_TASK_ALWAYS_EAGER else CELERY_BROKER_URL
+)
+# Where Groq rate-limit pacing state lives. With several worker processes
+# sharing one API key, each one pacing only against its OWN requests still
+# collides with the others -- sharing the state through Redis lets every
+# process see (and reserve against) the same budget. Empty = per-process
+# pacing. Falls back to per-process automatically if Redis is unreachable.
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./job_uploads")
 # Uploaded files wait here until a worker picks the job up -- a temp dir
 # deleted at the end of the request (the old approach) would be gone by

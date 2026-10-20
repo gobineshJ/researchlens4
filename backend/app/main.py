@@ -6,16 +6,15 @@ FastAPI backend for ResearchLens.
   /process                enqueues a pipeline run on Celery -> {job_id}
   /jobs/{job_id}          poll a run's status; holds the result when done
   /download/{filename}    the PDF report of one of YOUR runs
-  /evaluation-history     the run log
+  /evaluation-history     YOUR runs from the run log
 
 Everything except /health and /auth/token + /auth/register needs an
 "Authorization: Bearer <token>" header -- the routes are mounted on a
 router whose dependency is auth.get_current_user.
 
-CORS is wide open (allow_origins=["*"]) since this is a local training
-project, not a production deployment -- tighten this before deploying
-anywhere real. (Bearer tokens travel in a header, not a cookie, so the
-open CORS policy doesn't let other sites ride on a logged-in session.)
+CORS only admits the origins in CORS_ORIGINS, with credentials, since the
+refresh token travels in a cookie. The frontend normally reaches the API
+through a same-origin /api proxy and needs no CORS at all.
 """
 
 from pathlib import Path
@@ -35,9 +34,10 @@ app = FastAPI(title="ResearchLens API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=config.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
@@ -80,7 +80,7 @@ def process(
 
         try:
             run_pipeline_task.apply_async(
-                args=[str(job_dir.resolve()), saved_paths, urls, instructions],
+                args=[str(job_dir.resolve()), saved_paths, urls, instructions, user.username],
                 task_id=job_id,
             )
         except Exception as exc:
@@ -128,7 +128,8 @@ def job_status(job_id: str, user: User = Depends(get_current_user)):
 
     if result.state == "PROGRESS" and isinstance(result.info, dict):
         response["progress"] = {"stage": result.info.get("stage", ""),
-                                "detail": result.info.get("detail", "")}
+                                "detail": result.info.get("detail", ""),
+                                "draft": result.info.get("draft", "")}
     elif result.state == "SUCCESS":
         data = result.result
         if data.get("pdf_filename"):
@@ -153,13 +154,15 @@ def download(filename: str, user: User = Depends(get_current_user)):
 
 
 @protected.get("/evaluation-history")
-def evaluation_history(limit: int = 50):
+def evaluation_history(limit: int = 50, user: User = Depends(get_current_user)):
     """
     Every pipeline run is logged automatically (see pipeline.py's call
     to evaluation.append_run_to_log). This just reads that log back out
-    for the frontend's comparison view -- newest first.
+    for the frontend's comparison view -- newest first, and only the
+    calling user's own runs (instructions and check details describe
+    their documents, the same as their jobs and reports do).
     """
-    return {"runs": evaluation.read_run_history(limit=limit)}
+    return {"runs": evaluation.read_run_history(limit=limit, username=user.username)}
 
 
 app.include_router(protected)

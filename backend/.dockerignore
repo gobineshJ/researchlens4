@@ -1,0 +1,15 @@
+venv/
+.venv/
+.venv-linux/
+**/__pycache__/
+.pytest_cache/
+.coverage
+.env
+chroma_store/
+generated_reports/
+job_uploads/
+researchlens.db
+evaluation_log.jsonl
+figure_cache.json
+eval/results/
+tests/

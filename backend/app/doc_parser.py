@@ -25,6 +25,7 @@ Every other record is plain text and has no "content_type".
 import hashlib
 import json
 import logging
+import os
 import re
 from pathlib import Path
 import pymupdf as fitz
@@ -245,10 +246,23 @@ class _FigureDescriber:
         return description
 
     def save_cache(self) -> None:
+        """
+        Several worker processes can each be describing figures at once, so
+        this merges with whatever is on disk NOW (another process may have
+        saved since this one loaded) and writes via a temp file + rename,
+        so a concurrent reader never sees a half-written file.
+        """
         if not self._dirty:
             return
         try:
-            self.cache_path.write_text(json.dumps(self.cache), encoding="utf-8")
+            try:
+                on_disk = json.loads(self.cache_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                on_disk = {}
+            merged = {**on_disk, **self.cache}
+            tmp_path = self.cache_path.with_name(f"{self.cache_path.name}.{os.getpid()}.tmp")
+            tmp_path.write_text(json.dumps(merged), encoding="utf-8")
+            os.replace(tmp_path, self.cache_path)
         except OSError:
             pass  # a cache that can't be written only costs a re-description next run
 
