@@ -6,13 +6,18 @@ frontend polls /jobs/{job_id} for the result.
 
 Start a worker (from backend/, with Redis running):
 
-    celery -A app.celery_app worker --loglevel=info --pool=solo
+    celery -A app.celery_app worker --loglevel=info
 
---pool=solo is needed on Windows, where Celery's default prefork pool
-doesn't work. On Linux/macOS you can drop it.
+The pool is chosen for the platform below: on Linux/macOS/WSL a prefork
+pool runs CELERY_WORKER_CONCURRENCY pipeline runs at once, each in its own
+process; on native Windows, where prefork doesn't work, the solo pool runs
+one at a time. --pool / --concurrency on the command line still override.
+Several processes share one Groq key, so groq_client shares its
+rate-limit pacing state through Redis (GROQ_RATE_LIMIT_REDIS_URL).
 """
 
 import shutil
+import sys
 
 from celery import Celery
 
@@ -35,6 +40,8 @@ celery_app.conf.update(
     result_expires=60 * 60 * 24,
     worker_prefetch_multiplier=1,  # one long pipeline run at a time per worker process
     task_acks_late=True,
+    worker_pool="solo" if sys.platform == "win32" else "prefork",
+    worker_concurrency=1 if sys.platform == "win32" else config.CELERY_WORKER_CONCURRENCY,
 )
 
 # If Redis is down, give up within a few seconds so /process can answer
@@ -49,18 +56,30 @@ celery_app.conf.update(
 
 
 @celery_app.task(name="researchlens.run_pipeline", bind=True)
-def run_pipeline_task(self, job_dir: str, file_paths: list[str], seed_urls: list[str], instructions: str) -> dict:
+def run_pipeline_task(self, job_dir: str, file_paths: list[str], seed_urls: list[str], instructions: str,
+                      username: str | None = None) -> dict:
+    # `username` defaults to None so jobs queued before it was added still run.
     # Imported here rather than at module top so the API process (which
     # only enqueues) doesn't load the embedding and reranker models.
     from .pipeline import run_pipeline
 
+    # A custom "PROGRESS" state whose meta /jobs/{id} hands to the frontend
+    # while the run is still going: the current stage, a detail line, and
+    # the report so far once generation is streaming it.
+    meta = {"stage": "", "detail": "", "draft": ""}
+
     def publish(stage: str, detail: str) -> None:
-        # A custom "PROGRESS" state whose meta /jobs/{id} hands to the
-        # frontend while the run is still going.
-        self.update_state(state="PROGRESS", meta={"stage": stage, "detail": detail})
+        meta.update(stage=stage, detail=detail)
+        self.update_state(state="PROGRESS", meta=dict(meta))
+
+    def publish_draft(text: str) -> None:
+        meta["draft"] = text
+        self.update_state(state="PROGRESS", meta=dict(meta))
 
     try:
-        with progress.listening(publish):
-            return run_pipeline(file_paths, seed_urls, instructions)
+        with progress.listening(publish, on_draft=publish_draft):
+            # run_id = the job id, so a Run history entry can be matched to its job.
+            return run_pipeline(file_paths, seed_urls, instructions,
+                                username=username, run_id=self.request.id)
     finally:
         shutil.rmtree(job_dir, ignore_errors=True)

@@ -31,3 +31,7 @@ Thumbs.db
 # --- Auth DB + queued uploads ---
 backend/researchlens.db
 backend/job_uploads/
+
+# --- Evaluation outputs ---
+backend/eval/results/*
+!backend/eval/results/.gitignore

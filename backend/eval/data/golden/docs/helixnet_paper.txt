@@ -1,0 +1,38 @@
+HelixNet: Block-Sparse Attention for Long Clinical Notes
+
+Mira Okafor, Daniel Reyes and Priya Natarajan
+Lumen Institute for Clinical Computing, 2024
+
+Abstract
+
+Clinical notes are long, repetitive and full of abbreviations, and dense transformer attention scales quadratically with their length. We present HelixNet, a transformer encoder that replaces dense self-attention with block-sparse attention: each token attends to a local window of 512 tokens plus a small set of 32 global summary tokens that are shared across all blocks. On the task of assigning diagnosis codes to discharge summaries, HelixNet outperforms the 2019 baseline ClinBERT-L by 4.2 F1 points while using less than half of its GPU memory. We release the model weights for research use.
+
+1 Introduction
+
+Hospitals write millions of free-text notes every year, and much of the information needed for billing, audit and research is buried inside them. Automatic diagnosis coding is the most common application, but a typical discharge summary is between 3,000 and 9,000 tokens long, far beyond the 512-token limit of the encoders most often used in clinical natural language processing. The usual workaround is to cut each note into pieces and classify the pieces independently, which loses the links between a symptom described early in a note and a diagnosis confirmed at the end.
+
+Since its release in 2019, ClinBERT-L has been the standard baseline for this task. It processes notes in overlapping 512-token segments and pools the segment predictions. We argue that a model which can read the entire note at once should do better, and that the cost of doing so can be kept low by making attention sparse rather than dense.
+
+2 Method
+
+HelixNet keeps the standard encoder layout of 12 layers with a hidden size of 768, so that it can be initialised from existing clinical checkpoints. The change is in the attention pattern. Every token attends to the tokens inside its local window of 512 tokens. In addition, 32 global summary tokens attend to every position in the note and are attended to by every position. Information can therefore travel between distant parts of a note in two steps: from a token to a summary token, and from the summary token to another token. The attention pattern is computed in blocks of 64 tokens, which makes it efficient on current GPUs.
+
+The maximum input length is 16,384 tokens. Positions are encoded with rotary embeddings, which we extend from the 512 positions of the initial checkpoint by interpolation.
+
+3 Training data
+
+HelixNet was pre-trained and fine-tuned on the TerraNotes corpus, which contains 1.2 million de-identified clinical notes. We used the official training split for all model selection and report results on the official test split only once. Fine-tuning for diagnosis coding used the 50 most frequent codes, following earlier work. Training took 64 hours on eight A100 GPUs.
+
+4 Results
+
+On the TerraNotes diagnosis coding test set, HelixNet reaches a micro-averaged F1 score of 71.8, compared with 67.6 for ClinBERT-L, an improvement of 4.2 F1 points. The gain is largest for codes that depend on information spread across the note, such as complications that are mentioned in the history and confirmed in the discharge plan. Peak GPU memory during inference on a 9,000-token note is 9.1 GB for HelixNet, compared with 21.7 GB for ClinBERT-L running all of its segments in one batch.
+
+We also measured the effect of the global summary tokens. Removing them reduces F1 to 68.9, which shows that most of the improvement comes from letting distant parts of the note exchange information, not from the larger window alone.
+
+5 Limitations
+
+HelixNet has several limitations. First, it was trained and evaluated only on English notes, and we make no claims about other languages. Second, its accuracy drops sharply on notes longer than 16,000 tokens, which must be truncated; about 2 percent of discharge summaries exceed this length. Third, any bias present in the training corpus is likely to be reproduced by the model, and we did not audit predictions by patient group. Finally, HelixNet assigns codes but does not explain them, so it should support human coders rather than replace them.
+
+6 Conclusion
+
+Block-sparse attention lets a clinical encoder read a whole discharge summary at once. HelixNet improves diagnosis coding over ClinBERT-L while using less memory, and the global summary tokens are responsible for most of the gain.

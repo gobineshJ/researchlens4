@@ -193,3 +193,21 @@ def test_rate_limit_wait_is_reported_as_progress(fake_groq):
         progress.stage("extraction")
         groq_client._post_chat({"model": "m"})
     assert events == [("extraction", ""), ("extraction", "Rate-limited by Groq -- retrying in 4s")]
+
+
+def test_json_validate_failed_400_is_its_own_error_with_groqs_message(fake_groq):
+    queue, _ = fake_groq
+    bad = _Response(400)
+    bad.text = '{"error":{"code":"json_validate_failed","failed_generation":"max completion tokens reached"}}'
+    queue.append(bad)
+    with pytest.raises(groq_client.GroqJSONGenerationFailed, match="max completion tokens"):
+        groq_client._post_chat({"model": "m"})
+
+
+def test_other_http_errors_carry_groqs_message(fake_groq):
+    queue, _ = fake_groq
+    bad = _Response(400)
+    bad.text = '{"error":{"message":"model does not support reasoning_effort"}}'
+    queue.append(bad)
+    with pytest.raises(requests.HTTPError, match="does not support reasoning_effort"):
+        groq_client._post_chat({"model": "m"})

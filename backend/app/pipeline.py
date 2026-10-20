@@ -15,6 +15,8 @@ from .config import (
     TOP_K_CHUNKS, TOP_K_CHUNKS_PER_SOURCE, CANDIDATE_OVERSAMPLE_FACTOR,
     ANALYSIS_TOP_K_MULTIPLIER, RRF_K, GROUNDEDNESS_THRESHOLD, MAX_RETRIEVAL_ATTEMPTS,
     GROQ_MAX_CONTEXT_TOKENS, SUMMARY_MAX_EXCERPTS_PER_SOURCE, SUMMARY_MIN_EXCERPT_TOKENS,
+    MULTI_HOP_ENABLED, MULTI_HOP_MAX_EXTRA_HOPS, ENTAILMENT_CHECK_ENABLED, ENTAILMENT_MAX_CLAIMS,
+    CLAIM_REVISION_ENABLED,
 )
 
 
@@ -59,7 +61,158 @@ def _hybrid_retrieve_and_rerank(source_names: list[str], chunks_by_source: dict[
     return retrieved
 
 
-def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str) -> dict:
+def _interleave_by_source(earlier: list[dict], later: list[dict]) -> list[dict]:
+    """
+    Merges a follow-up hop's chunks into what earlier hops found,
+    alternating within each source (earlier[0], later[0], earlier[1], ...).
+    fit_chunks_to_budget keeps a prefix of each source's list, so simply
+    appending would make the hop's results -- the very facts the follow-up
+    went looking for -- the first thing a budget trim drops.
+    """
+    by_source: dict[str, tuple[list[dict], list[dict]]] = {}
+    for c in earlier:
+        by_source.setdefault(c["source_name"], ([], []))[0].append(c)
+    for c in later:
+        by_source.setdefault(c["source_name"], ([], []))[1].append(c)
+    merged: list[dict] = []
+    for first, second in by_source.values():
+        for i in range(max(len(first), len(second))):
+            merged.extend(group[i] for group in (first, second) if i < len(group))
+    return merged
+
+
+def _multi_hop_retrieve(instructions: str, queries: list[str], source_names: list[str],
+                        chunks_by_source: dict[str, list[dict]], collection,
+                        final_k: int, oversample_k: int) -> tuple[list[dict], list[dict]]:
+    """
+    Iterative multi-hop retrieval. Hop 1 is the ordinary hybrid retrieval
+    for `queries`. Then, up to MULTI_HOP_MAX_EXTRA_HOPS times, Groq reads
+    the evidence found so far (groq_client.plan_follow_up) and decides
+    whether the question needs a fact that evidence points to but doesn't
+    contain -- "what dataset did the method that beat the 2019 baseline
+    use?" can only look up the dataset once hop 1 has revealed the
+    method's name. Its follow-up queries are retrieved as the next hop
+    and merged in. Stops as soon as the planner says the evidence
+    suffices, or a hop turns up nothing new.
+
+    Returns (retrieved chunks, one record per hop for the evaluation panel).
+    """
+    retrieved = _hybrid_retrieve_and_rerank(
+        source_names, chunks_by_source, collection, queries, final_k, oversample_k
+    )
+    hops = [{"queries": list(queries), "new_chunks": len(retrieved), "missing": ""}]
+    if not MULTI_HOP_ENABLED or not retrieved:
+        return retrieved, hops
+
+    tried = list(queries)
+    for _ in range(MULTI_HOP_MAX_EXTRA_HOPS):
+        plan = groq_client.plan_follow_up(instructions, retrieved, tried)
+        if plan["complete"] or not plan["queries"]:
+            break
+        found = _hybrid_retrieve_and_rerank(
+            source_names, chunks_by_source, collection, plan["queries"], final_k, oversample_k
+        )
+        seen = {c["text"] for c in retrieved}
+        new = [c for c in found if c["text"] not in seen]
+        hops.append({"queries": plan["queries"], "new_chunks": len(new), "missing": plan["missing"]})
+        tried += plan["queries"]
+        if not new:
+            break
+        retrieved = _interleave_by_source(retrieved, new)
+    return retrieved, hops
+
+
+_FLAGGED = ("unsupported", "contradicted")
+
+
+def _revise_flagged_claims(generation_result: dict, claims: list[dict], verdicts: list[dict],
+                           retrieved: list[dict], report) -> dict:
+    """
+    Targeted revision: rewrites only the sentences the entailment judge
+    flagged (groq_client.revise_claims), splices them back into the report
+    in place, and judges the rewrites again. `verdicts` is updated in
+    place: a revised claim gets its new verdict, with the original sentence
+    kept under "original"; a removed one gets verdict "removed".
+
+    Returns the generation result to use from here on -- the original one
+    if nothing was flagged or the revision request failed.
+    """
+    flagged = [i for i, v in enumerate(verdicts) if v["verdict"] in _FLAGGED]
+    if not flagged:
+        return generation_result
+
+    with report.timed_stage("claim_revision"):
+        try:
+            revisions = groq_client.revise_claims(
+                [{"claim": verdicts[i]["claim"], "sources": verdicts[i]["sources"],
+                  "reason": verdicts[i]["reason"]} for i in flagged],
+                retrieved,
+            )
+            applied = [(i, r) for i, r in zip(flagged, revisions) if r is not None]
+            rewrites = [(i, r) for i, r in applied if r["action"] == "rewrite"]
+            new_verdicts = groq_client.judge_claims(
+                [{"text": evaluation.clean_claim_text(r["text"]), "sources": claims[i]["sources"]}
+                 for i, r in rewrites],
+                retrieved,
+            ) if rewrites else []
+        except Exception as exc:
+            report.record_error("claim_revision", f"Flagged claims could not be revised: {exc}")
+            return generation_result
+
+    report_text = evaluation.apply_revisions(
+        generation_result["report_text"],
+        [{**r, "span": claims[i]["span"]} for i, r in applied],
+    )
+    for i, r in applied:
+        verdicts[i]["original"] = verdicts[i]["claim"]
+        verdicts[i]["original_verdict"] = verdicts[i]["verdict"]
+        if r["action"] == "remove":
+            verdicts[i].update(verdict="removed", claim="", reason="Removed: its cited excerpts support none of it.")
+    for (i, r), new in zip(rewrites, new_verdicts):
+        verdicts[i].update(claim=new["claim"], verdict=new["verdict"], reason=new["reason"])
+
+    fixed = sum(1 for i, _ in rewrites if verdicts[i]["verdict"] == "supported")
+    removed = sum(1 for _, r in applied if r["action"] == "remove")
+    report.add_check(
+        "generation", "claim_revision", True,
+        f"{len(flagged)} flagged sentence(s): {len(rewrites)} rewritten against their cited "
+        f"excerpts ({fixed} now judged supported), {removed} removed"
+        + (f", {len(flagged) - len(applied)} left unchanged (the reviser skipped them)"
+           if len(applied) < len(flagged) else "")
+        + ". The rest of the report is unchanged; originals are listed in the Claim check.",
+        value=fixed + removed,
+    )
+    return {"report_text": report_text,
+            "citations_used": groq_client.citations_for(report_text, retrieved)}
+
+
+def _hop_detail(hops: list[dict]) -> str:
+    if len(hops) == 1:
+        return ("Single hop: the evidence from the first retrieval pass was judged sufficient, "
+                "so no follow-up lookups were needed.")
+    steps = "; ".join(
+        f"hop {n + 2} looked up {hop['missing'] or 'a follow-up'} via {hop['queries']} "
+        f"-> {hop['new_chunks']} new chunk(s)"
+        for n, hop in enumerate(hops[1:])
+    )
+    return (f"{len(hops)} hops: each follow-up was planned from the evidence the previous hop "
+            f"retrieved. {steps}.")
+
+
+def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str,
+                 username: str | None = None, run_id: str | None = None) -> dict:
+    """Runs every stage (see _run_pipeline) and always drops the run's
+    vector collection afterwards, even if a stage failed."""
+    collections: list = []
+    try:
+        return _run_pipeline(file_paths, seed_urls, instructions, username, run_id, collections)
+    finally:
+        for collection in collections:
+            vectorstore.drop_session_collection(collection)
+
+
+def _run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str,
+                  username: str | None, run_id: str | None, collections: list) -> dict:
     report = evaluation.EvaluationReport()
     all_records: list[dict] = []
 
@@ -103,6 +256,7 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
     # --- Stage 6: embed + store in a fresh ChromaDB session collection ---
     with report.timed_stage("embedding_and_storage"):
         collection, session_id = vectorstore.new_session_collection()
+        collections.append(collection)
         vectorstore.add_chunks(collection, chunks)
 
     # --- Stage 7: retrieve for the report query ---
@@ -128,9 +282,11 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
     #       retrieved independently, so evidence for each part gets pulled
     #       in rather than one averaged embedding missing one of them. This
     #       is query decomposition / "compositional" multi-hop: sub-
-    #       questions are retrieved independently and in parallel, not as
-    #       a chain where one hop's results shape the next query (that
-    #       would be iterative multi-hop, which this does not implement).
+    #       questions are retrieved independently and in parallel. On top
+    #       of that, _multi_hop_retrieve adds ITERATIVE multi-hop: after
+    #       each pass, Groq reads what was found and, if the question needs
+    #       a fact that evidence points to but doesn't contain, retrieves
+    #       for it as the next hop.
     #       For each source document and each resulting query, both dense
     #       vector search AND BM25 keyword search run independently, then
     #       their two RANKINGS (not raw scores, which live on incomparable
@@ -262,9 +418,12 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
             expanded_queries = _dedupe_preserve_order(
                 q for sq in sub_questions for q in groq_client.expand_query(sq)
             )
-            retrieved = _hybrid_retrieve_and_rerank(
-                source_names, chunks_by_source, collection, expanded_queries, final_k, oversample_k
+            retrieved, hops = _multi_hop_retrieve(
+                instructions, expanded_queries, source_names, chunks_by_source, collection,
+                final_k, oversample_k,
             )
+            if MULTI_HOP_ENABLED:
+                report.add_check("retrieval", "multi_hop", True, _hop_detail(hops), value=len(hops))
 
     # --- Stage 8: Groq report generation (with one self-correction retry) ---
     # Trim to the generation context budget BEFORE generating, and keep the
@@ -296,9 +455,11 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
                     q for sq in sub_questions
                     for q in groq_client.expand_query(sq, avoid=expanded_queries)
                 )
-                retried = groq_client.fit_chunks_to_budget(_hybrid_retrieve_and_rerank(
-                    source_names, chunks_by_source, collection, retry_queries, final_k, oversample_k
-                ))
+                retried_hops, _ = _multi_hop_retrieve(
+                    instructions, retry_queries, source_names, chunks_by_source, collection,
+                    final_k, oversample_k,
+                )
+                retried = groq_client.fit_chunks_to_budget(retried_hops)
                 retry_generation = groq_client.generate_report(retried, instructions) if retried else generation_result
                 retry_groundedness = (
                     evaluation.compute_groundedness(
@@ -329,6 +490,31 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
     evaluation.validate_source_coverage(source_names, retrieved, report)
     if intent == "summary":
         evaluation.validate_span_coverage(summary_chunks_by_source, retrieved, report)
+    # Entailment: does each cited sentence say what its cited excerpt says?
+    # The report's [n] markers index `retrieved` -- the exact list the final
+    # generation call was numbered from.
+    claim_verdicts: list[dict] = []
+    if ENTAILMENT_CHECK_ENABLED and generation_result["report_text"]:
+        claims = evaluation.extract_cited_claims(
+            generation_result["report_text"], len(retrieved), max_claims=ENTAILMENT_MAX_CLAIMS
+        )
+        with report.timed_stage("entailment"):
+            try:
+                claim_verdicts = groq_client.judge_claims(claims, retrieved) if claims else []
+                judged = True
+            except Exception as exc:
+                # The report itself is fine; only the check couldn't run.
+                # Recorded as an error rather than a pass or a fail.
+                report.record_error("entailment", f"Entailment check could not run: {exc}")
+                judged = False
+        if judged and CLAIM_REVISION_ENABLED:
+            generation_result = _revise_flagged_claims(
+                generation_result, claims, claim_verdicts, retrieved, report
+            )
+        if judged:
+            evaluation.validate_entailment(claims, claim_verdicts, report)
+
+    # After any revision, so these describe the report that is returned.
     evaluation.validate_generation(
         generation_result["report_text"], generation_result["citations_used"], retrieved, report
     )
@@ -349,7 +535,7 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
                 report,
             )
 
-    evaluation.append_run_to_log(report, instructions=instructions)
+    evaluation.append_run_to_log(report, run_id=run_id, instructions=instructions, username=username)
 
     return {
         "extracted_records": len(all_records),
@@ -359,6 +545,7 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str)
         "retrieved_chunks": retrieved,
         "report_text": generation_result["report_text"],
         "citations_used": generation_result["citations_used"],
+        "claim_verdicts": claim_verdicts,
         "pdf_path": pdf_path,
         # Just the filename, OS-agnostic -- the frontend uses this directly
         # for the download link instead of trying to parse pdf_path itself,

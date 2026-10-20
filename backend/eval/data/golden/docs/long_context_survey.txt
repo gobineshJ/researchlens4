@@ -1,0 +1,31 @@
+Reading the Whole Chart: A Survey of Long-Context Models for Clinical Text
+
+Ines Varga, Department of Health Informatics, Northvale University, 2025
+
+1 Scope
+
+This survey compares three recent approaches to processing long clinical documents with transformer models: HelixNet, WindowFormer and the Recurrent Memory Clinical Transformer (RMCT). All three were evaluated on diagnosis coding of discharge summaries, which allows a direct comparison. We focus on accuracy, memory use and behaviour on very long notes. We did not retrain any model; the figures below are taken from the original papers and from our own inference measurements on the same hardware.
+
+2 The three approaches
+
+WindowFormer uses sliding-window attention with a window of 1,024 tokens and no global tokens. Its larger window helps with local context, but information can only move across a long note one window at a time, layer by layer.
+
+HelixNet uses a smaller local window of 512 tokens combined with 32 global summary tokens that connect every part of the note. In our measurements this design gives it the lowest memory use of the three models.
+
+RMCT takes a different route. It reads a note in segments of 2,048 tokens and carries a memory of 128 vectors from one segment to the next, which means it has no fixed maximum input length.
+
+3 Comparison
+
+On diagnosis coding of discharge summaries, the reported micro-averaged F1 scores are 71.8 for HelixNet, 70.1 for WindowFormer and 70.9 for RMCT. The older baseline ClinBERT-L reaches 67.6. Peak inference memory on a 9,000-token note was 9.1 GB for HelixNet, 14.3 GB for WindowFormer and 11.6 GB for RMCT.
+
+The ranking changes for very long notes. On the subset of discharge summaries longer than 16,000 tokens, RMCT is the most accurate model, with an F1 of 69.4, because it never has to truncate its input. HelixNet and WindowFormer both truncate at their maximum length and fall below 64 F1 on this subset.
+
+Speed differs as well. RMCT processes segments one after another, so its latency grows with note length, and it was the slowest model on long notes: 2.8 seconds per 16,000-token note, against 0.9 seconds for HelixNet.
+
+4 Recommendations
+
+For typical discharge summaries, HelixNet offers the best balance of accuracy and memory. For collections with many very long notes, such as psychiatric or oncology records, RMCT is the better choice despite its higher latency. WindowFormer is the simplest to implement but is dominated by the other two models on every measure we report.
+
+5 Open problems
+
+None of the three models was evaluated on languages other than English. All three were trained on corpora dominated by adult intensive care notes, and none reports results broken down by patient age group. We consider subgroup evaluation the most important gap in the current literature.

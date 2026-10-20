@@ -41,6 +41,11 @@ def _run(all_chunks, intent, instructions="Discuss the topic", **overrides):
         rerank_with_fallback=lambda q, cands, top_k: cands[:top_k],
         generate_report={"report_text": "Report [1]", "citations_used": [all_chunks[0]["source_label"]]},
         build_pdf="/tmp/fake.pdf",
+        plan_follow_up=lambda *a, **k: {"complete": True, "missing": "", "queries": []},
+        revise_claims=lambda flagged, chunks, **k: [None] * len(flagged),
+        judge_claims=lambda claims, chunks, **k: [
+            {"claim": c["text"], "sources": c["sources"], "verdict": "supported", "reason": ""} for c in claims
+        ],
     )
     defaults.update(overrides)
 
@@ -54,7 +59,7 @@ def _run(all_chunks, intent, instructions="Discuss the topic", **overrides):
          patch("app.groq_client.expand_query", side_effect=defaults["expand_query"]), \
          patch("app.reranker.rerank_with_fallback", side_effect=defaults["rerank_with_fallback"]), \
          patch("app.groq_client.generate_report", side_effect=defaults["generate_report"] if callable(defaults["generate_report"]) else lambda *a, **k: defaults["generate_report"]), \
-         patch("app.pdf_export.build_pdf", return_value=defaults["build_pdf"]):
+         patch("app.pdf_export.build_pdf", return_value=defaults["build_pdf"]),          patch("app.groq_client.plan_follow_up", side_effect=defaults["plan_follow_up"]),          patch("app.groq_client.judge_claims", side_effect=defaults["judge_claims"]),          patch("app.groq_client.revise_claims", side_effect=defaults["revise_claims"]):
         return pipeline.run_pipeline(file_paths=[], seed_urls=[], instructions=instructions)
 
 

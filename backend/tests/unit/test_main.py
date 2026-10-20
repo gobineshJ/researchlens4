@@ -90,10 +90,11 @@ def test_process_enqueues_job_and_records_owner(auth_headers, captured_jobs):
     assert response.json()["status"] == "queued"
 
     assert len(captured_jobs) == 1
-    job_dir, file_paths, urls, instructions = captured_jobs[0]["args"]
+    job_dir, file_paths, urls, instructions, username = captured_jobs[0]["args"]
     assert captured_jobs[0]["task_id"] == job_id
     assert urls == ["https://a.example", "https://b.example"]
     assert instructions == "summarize"
+    assert username == "alice"
     assert open(file_paths[0], "rb").read() == b"some text"
     assert db.get_job_owner(job_id) == "alice"
 
@@ -102,7 +103,7 @@ def test_process_strips_directory_from_upload_filename(auth_headers, captured_jo
     from pathlib import Path
     client.post("/process", files=[("files", ("../../evil.txt", b"x", "text/plain"))],
                 headers=auth_headers)
-    job_dir, file_paths, _, _ = captured_jobs[0]["args"]
+    job_dir, file_paths, *_ = captured_jobs[0]["args"]
     assert Path(file_paths[0]).parent == Path(job_dir)
     assert Path(file_paths[0]).name == "evil.txt"
 
@@ -161,7 +162,7 @@ def test_evaluation_history_returns_expected_shape(monkeypatch, auth_headers):
     """
     from app import main as main_module
     fake_runs = [{"run_id": "abc", "summary": "5/5 checks passed", "checks": []}]
-    monkeypatch.setattr(main_module.evaluation, "read_run_history", lambda limit=50: fake_runs)
+    monkeypatch.setattr(main_module.evaluation, "read_run_history", lambda limit=50, username=None: fake_runs)
 
     response = client.get("/evaluation-history", headers=auth_headers)
     assert response.status_code == 200
@@ -171,7 +172,7 @@ def test_evaluation_history_returns_expected_shape(monkeypatch, auth_headers):
 def test_evaluation_history_respects_limit_param(monkeypatch, auth_headers):
     from app import main as main_module
     captured = {}
-    def fake_read(limit=50):
+    def fake_read(limit=50, username=None):
         captured["limit"] = limit
         return []
     monkeypatch.setattr(main_module.evaluation, "read_run_history", fake_read)
@@ -188,4 +189,20 @@ def test_job_status_running_includes_progress(auth_headers, captured_jobs, monke
     monkeypatch.setattr(main_module, "AsyncResult", lambda job_id, app: fake)
     body = client.get(f"/jobs/{job_id}", headers=auth_headers).json()
     assert body["status"] == "running"
-    assert body["progress"] == {"stage": "extraction", "detail": "Describing Figure 3 of a.pdf (page 7)"}
+    assert body["progress"] == {"stage": "extraction", "detail": "Describing Figure 3 of a.pdf (page 7)",
+                                "draft": ""}
+
+
+def test_evaluation_history_only_shows_the_callers_runs(auth_headers):
+    """The real log, not a monkeypatched read: runs logged for one user
+    are invisible to another, and legacy entries without a user to anyone."""
+    from app import evaluation
+    for user in ("alice", "bob", None):
+        evaluation.append_run_to_log(evaluation.EvaluationReport(), run_id=f"run-{user}",
+                                     instructions=f"{user}'s private topic", username=user)
+
+    alice_runs = client.get("/evaluation-history", headers=auth_headers).json()["runs"]
+    assert [r["run_id"] for r in alice_runs] == ["run-alice"]
+
+    bob_runs = client.get("/evaluation-history", headers=_make_user("bob")).json()["runs"]
+    assert [r["run_id"] for r in bob_runs] == ["run-bob"]

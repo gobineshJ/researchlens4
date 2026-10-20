@@ -1,0 +1,62 @@
+# Everything in one command:
+#
+#     docker compose up --build
+#
+# then open http://localhost:8080. Needs backend/.env with GROQ_API_KEY and
+# JWT_SECRET_KEY (see backend/.env.example); the settings below override the
+# paths and URLs in it that only make sense outside containers.
+#
+#   frontend  nginx serving the React build, proxying /api to the API
+#   api       FastAPI (also on http://localhost:8000/docs for Swagger)
+#   worker    Celery, prefork pool, CELERY_WORKER_CONCURRENCY runs at once
+#   redis     job queue + results + shared Groq rate-limit state
+#
+# Accounts, reports, run history and the figure cache live in the
+# "app-data" volume, so they survive `docker compose down` (add -v to wipe).
+
+x-backend: &backend
+  build: ./backend
+  image: researchlens-backend
+  env_file: ./backend/.env
+  environment:
+    CELERY_BROKER_URL: redis://redis:6379/0
+    CELERY_RESULT_BACKEND: redis://redis:6379/1
+    CELERY_TASK_ALWAYS_EAGER: "false"
+    GROQ_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
+    CHROMA_MODE: ephemeral
+    UPLOAD_DIR: /data/job_uploads
+    OUTPUT_DIR: /data/generated_reports
+    AUTH_DB_PATH: /data/researchlens.db
+    EVALUATION_LOG_PATH: /data/evaluation_log.jsonl
+    FIGURE_CACHE_PATH: /data/figure_cache.json
+    CORS_ORIGINS: http://localhost:8080
+  volumes:
+    - app-data:/data
+  depends_on:
+    - redis
+  restart: unless-stopped
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  api:
+    <<: *backend
+    ports:
+      - "8000:8000"
+
+  worker:
+    <<: *backend
+    command: celery -A app.celery_app worker --loglevel=info
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  app-data:
