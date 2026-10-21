@@ -1,0 +1,104 @@
+name: Daily arXiv digest
+
+# Runs backend/app/daily_digest.py on GitHub's servers once a day: searches
+# arXiv for every feed in digest.toml, runs the ResearchLens pipeline on the
+# new papers, commits the reports + digests/seen.json back to this repo, and
+# emails them. Nothing has to stay running anywhere.
+#
+# Repository secrets (Settings -> Secrets and variables -> Actions):
+#   GROQ_API_KEY      required
+#   SMTP_USER         your Gmail address            } leave unset to skip
+#   SMTP_PASSWORD     a Gmail *app password*        } the email
+#   DIGEST_EMAIL_TO   optional; defaults to SMTP_USER
+#
+# Run it by hand any time: Actions tab -> Daily arXiv digest -> Run workflow.
+
+on:
+  schedule:
+    # 03:30 UTC daily. arXiv announces new papers around 00:00 UTC Mon-Fri,
+    # so this catches each announcement; weekend runs usually find nothing
+    # and send nothing. GitHub may start scheduled runs a few minutes late.
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Search only -- show what would be processed, change nothing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # to commit digests/ back
+
+concurrency:
+  group: daily-digest
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      # One process, no Redis/Celery: Groq pacing stays in-process.
+      CELERY_TASK_ALWAYS_EAGER: "true"
+      GROQ_RATE_LIMIT_REDIS_URL: ""
+      CHROMA_MODE: ephemeral
+      # Describing every figure in 5 papers is ~100 vision calls -- too slow
+      # for Groq's free tier on a daily run. Text, tables and captions are
+      # still read. Set to "true" if you're on a paid Groq tier.
+      FIGURE_CAPTIONING_ENABLED: "false"
+      OUTPUT_DIR: ${{ runner.temp }}/reports
+      FIGURE_CACHE_PATH: ${{ runner.temp }}/figure_cache.json
+      AUTH_DB_PATH: ${{ runner.temp }}/researchlens.db
+      # Kept in the repo, so report quality can be compared over time.
+      EVALUATION_LOG_PATH: ../digests/evaluation_log.jsonl
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        # CPU-only PyTorch first, as in backend/Dockerfile: the default
+        # wheel adds ~2 GB of CUDA libraries a CPU runner never uses.
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install -r requirements.txt
+
+      - name: Cache embedding + reranker models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-models-all-MiniLM-L6-v2-ms-marco-MiniLM-L-6-v2
+
+      - name: Run digest
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          DIGEST_EMAIL_TO: ${{ secrets.DIGEST_EMAIL_TO }}
+        run: >
+          python -m app.daily_digest --config ../digest.toml --state-dir ../digests
+          ${{ inputs.dry_run && '--dry-run' || '' }}
+
+      - name: Commit reports and seen papers
+        # Even if a feed or the email failed: whatever did succeed must be
+        # recorded, or tomorrow's run would cover those papers again.
+        if: always() && !inputs.dry_run
+        working-directory: .
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898183+github-actions[bot]@users.noreply.github.com"
+          git add digests
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+            exit 0
+          fi
+          git commit -m "Daily digest $(date -u +%F)"
+          git pull --rebase
+          git push
