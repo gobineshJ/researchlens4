@@ -272,3 +272,30 @@ UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./job_uploads")
 # Uploaded files wait here until a worker picks the job up -- a temp dir
 # deleted at the end of the request (the old approach) would be gone by
 # then. The API and the worker must both be able to read this path.
+
+# --- API keys (machine clients: n8n, scripts, an MCP server) ---
+API_KEY_HEADER_NAME = "X-API-Key"
+# Long-lived keys for clients that can't do the browser's login + refresh
+# cookie dance. Sent as "X-API-Key: rl_..." on any protected route instead
+# of "Authorization: Bearer". Created with POST /auth/api-keys (from a
+# logged-in session) or `python -m app.create_api_key <username> <name>`;
+# stored hashed, shown once, revoked with DELETE /auth/api-keys/{key_id}.
+
+# --- arXiv (daily paper digests) ---
+ARXIV_API_URL = "https://export.arxiv.org/api/query"
+ARXIV_PDF_URL = "https://export.arxiv.org/pdf/{arxiv_id}"
+# export.arxiv.org is the host arXiv asks programmatic clients to use, for
+# both the search API and PDFs, so automated traffic stays off arxiv.org.
+ARXIV_REQUEST_INTERVAL_SECONDS = 3.0
+# arXiv's API terms: no more than one request every three seconds. Applied
+# per process to searches and to every PDF download.
+ARXIV_TIMEOUT_SECONDS = 30
+ARXIV_MAX_PDF_BYTES = 50 * 1024 * 1024
+ARXIV_MAX_PAPERS_PER_RUN = int(os.getenv("ARXIV_MAX_PAPERS_PER_RUN", "8"))
+# Papers one /papers/arxiv/process job may include. Every paper is one more
+# source sharing the same GROQ_MAX_CONTEXT_TOKENS budget, so past a handful
+# each one is represented by too few excerpts to summarise well.
+ARXIV_DEFAULT_INSTRUCTIONS = (
+    "Summarize each paper: the problem it addresses, its method, its key "
+    "results, and its stated limitations. Then note any themes the papers share."
+)
