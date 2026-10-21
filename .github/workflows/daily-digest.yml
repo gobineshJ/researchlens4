@@ -50,9 +50,6 @@ jobs:
       # for Groq's free tier on a daily run. Text, tables and captions are
       # still read. Set to "true" if you're on a paid Groq tier.
       FIGURE_CAPTIONING_ENABLED: "false"
-      OUTPUT_DIR: ${{ runner.temp }}/reports
-      FIGURE_CACHE_PATH: ${{ runner.temp }}/figure_cache.json
-      AUTH_DB_PATH: ${{ runner.temp }}/researchlens.db
       # Kept in the repo, so report quality can be compared over time.
       EVALUATION_LOG_PATH: ../digests/evaluation_log.jsonl
     steps:
@@ -79,6 +76,11 @@ jobs:
 
       - name: Run digest
         env:
+          # Scratch files, thrown away with the runner. (`runner` isn't
+          # available in job-level env, only here in a step's.)
+          OUTPUT_DIR: ${{ runner.temp }}/reports
+          FIGURE_CACHE_PATH: ${{ runner.temp }}/figure_cache.json
+          AUTH_DB_PATH: ${{ runner.temp }}/researchlens.db
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           DIGEST_EMAIL_TO: ${{ secrets.DIGEST_EMAIL_TO }}
