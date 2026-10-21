@@ -21,7 +21,7 @@ import sys
 
 from celery import Celery
 
-from . import config, progress
+from . import config, db, papers, progress
 
 celery_app = Celery("researchlens")
 
@@ -57,8 +57,14 @@ celery_app.conf.update(
 
 @celery_app.task(name="researchlens.run_pipeline", bind=True)
 def run_pipeline_task(self, job_dir: str, file_paths: list[str], seed_urls: list[str], instructions: str,
-                      username: str | None = None) -> dict:
-    # `username` defaults to None so jobs queued before it was added still run.
+                      username: str | None = None, arxiv_ids: list[str] | None = None,
+                      feed: str | None = None) -> dict:
+    # `username`, `arxiv_ids` and `feed` default to None so jobs queued
+    # before they were added still run.
+    # arxiv_ids: papers to download into job_dir before the pipeline starts
+    # (/papers/arxiv/process). Once the report is done they are marked seen
+    # in `feed` -- only then, so a failed run's papers are offered again on
+    # the next digest instead of silently skipped.
     # Imported here rather than at module top so the API process (which
     # only enqueues) doesn't load the embedding and reranker models.
     from .pipeline import run_pipeline
@@ -78,8 +84,19 @@ def run_pipeline_task(self, job_dir: str, file_paths: list[str], seed_urls: list
 
     try:
         with progress.listening(publish, on_draft=publish_draft):
+            downloaded: list[str] = []
+            failures: list[str] = []
+            if arxiv_ids:
+                pdf_paths, downloaded, failures = papers.download_arxiv_pdfs(arxiv_ids, job_dir)
+                file_paths = list(file_paths) + pdf_paths
             # run_id = the job id, so a Run history entry can be matched to its job.
-            return run_pipeline(file_paths, seed_urls, instructions,
-                                username=username, run_id=self.request.id)
+            result = run_pipeline(file_paths, seed_urls, instructions,
+                                  username=username, run_id=self.request.id)
+        if arxiv_ids:
+            result["arxiv"] = {"included": downloaded, "failed": failures}
+            if feed and username:
+                db.mark_papers_seen(username, feed, "arxiv",
+                                    [papers.base_id(i) for i in downloaded], job_id=self.request.id)
+        return result
     finally:
         shutil.rmtree(job_dir, ignore_errors=True)

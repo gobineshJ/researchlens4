@@ -34,7 +34,7 @@ def test_login_sets_an_httponly_strict_refresh_cookie():
     # Stored hashed, never as the token itself.
     token = client.cookies[COOKIE]
     assert db.get_refresh_token(token) is None
-    assert db.get_refresh_token(auth._hash_refresh(token)) is not None
+    assert db.get_refresh_token(auth._hash_secret(token)) is not None
 
 
 def test_refresh_returns_a_working_access_token_and_rotates_the_cookie():

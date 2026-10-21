@@ -31,7 +31,8 @@ def captured_jobs(monkeypatch):
     from app import main as main_module
     calls = []
     monkeypatch.setattr(main_module.run_pipeline_task, "apply_async",
-                        lambda args, task_id: calls.append({"args": args, "task_id": task_id}))
+                        lambda args, task_id, kwargs=None:
+                        calls.append({"args": args, "kwargs": kwargs, "task_id": task_id}))
     return calls
 
 
