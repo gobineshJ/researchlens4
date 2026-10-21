@@ -1,0 +1,38 @@
+# Daily arXiv digests -- read by backend/app/daily_digest.py, which
+# .github/workflows/daily-digest.yml runs every day on GitHub's servers.
+# Edit this file on GitHub to change topics; the next run picks it up.
+#
+# Each [[feed]] becomes one report (Markdown + PDF in digests/reports/) and
+# remembers its own covered papers in digests/seen.json, so nothing repeats.
+#
+#   keywords      phrases searched in title/abstract/etc., OR'd together
+#   categories    arXiv categories (https://arxiv.org/category_taxonomy), OR'd
+#                 together; AND'ed with keywords when both are given
+#   days          only papers submitted in the last N days. arXiv announces
+#                 papers about a day after submission, so keep this >= 2;
+#                 seen.json stops the overlap from repeating anything.
+#   max_papers    papers per report (1-8). They share one context budget on
+#                 Groq's free tier, so fewer papers = more detail on each.
+#   max_results   how many of the newest matches to look through (1-100)
+#   instructions  what the report should do (default: per-paper summary)
+
+# Send an email even on days when no feed found anything new.
+email_when_nothing_new = false
+
+[defaults]
+days = 3
+max_papers = 5
+max_results = 50
+
+[[feed]]
+name = "rag"
+keywords = ["retrieval augmented generation", "retrieval-augmented"]
+categories = ["cs.CL", "cs.IR", "cs.AI"]
+
+# Another example -- uncomment and edit:
+# [[feed]]
+# name = "llm-agents"
+# keywords = ["LLM agent", "tool use"]
+# categories = ["cs.AI", "cs.CL"]
+# max_papers = 4
+# instructions = "For each paper: what the agent does, how it was evaluated, and the headline result."

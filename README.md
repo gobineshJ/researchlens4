@@ -144,6 +144,9 @@ researchlens/
 ├── .gitignore
 ├── README.md
 ├── .github/workflows/backend-tests.yml   # runs unit tests on every push
+├── .github/workflows/daily-digest.yml    # the daily arXiv digest, on GitHub's servers
+├── digest.toml                # which topics the daily digest covers
+├── digests/                   # written by the digest workflow: reports/, seen.json, evaluation_log.jsonl
 ├── backend/
 │   ├── requirements.txt
 │   ├── requirements-dev.txt   # adds pytest, pytest-cov
@@ -154,10 +157,13 @@ researchlens/
 │   ├── figure_cache.json      # created on first run; gitignored -- figure descriptions, so each is only paid for once
 │   ├── job_uploads/           # gitignored -- uploaded files waiting for a worker; deleted when the job finishes
 │   ├── app/
-│   │   ├── main.py            # FastAPI app + endpoints; all but /health behind bearer-token auth
-│   │   ├── auth.py            # OAuth2 password flow: login/register, JWT issue + validation
-│   │   ├── db.py              # SQLite: user accounts + which user owns which job
+│   │   ├── main.py            # FastAPI app + endpoints; all but /health behind bearer-token or API-key auth
+│   │   ├── auth.py            # OAuth2 password flow: login/register, JWT issue + validation; API keys
+│   │   ├── db.py              # SQLite: user accounts, API keys, job ownership, papers each digest feed has covered
+│   │   ├── papers.py          # arXiv search (Atom feed -> dicts) + PDF download, paced to arXiv's API terms
+│   │   ├── daily_digest.py    # the scheduled digest: search -> pipeline -> reports + seen.json -> email
 │   │   ├── create_user.py     # `python -m app.create_user <name>` CLI
+│   │   ├── create_api_key.py  # `python -m app.create_api_key <user> <key name>` CLI
 │   │   ├── celery_app.py      # Celery app + the task that runs the pipeline on a worker
 │   │   ├── progress.py        # stage/detail progress updates, published by the Celery task for the UI
 │   │   ├── config.py          # all tunable settings, env vars
@@ -284,6 +290,84 @@ python -m app.create_user alice
 In Swagger (`http://127.0.0.1:8000/docs`), use the **Authorize** button to log in before trying the protected endpoints.
 
 `/process` now returns `{"job_id": ...}` immediately (HTTP 202). Poll `GET /jobs/{job_id}` until `status` is `done` (the pipeline's output is in `result`) or `error` (with `error`). Users can only see their own jobs and download their own reports.
+
+### API keys (n8n, scripts, MCP)
+
+Machine clients can't log in and refresh like a browser, so they send a long-lived **API key** in an `X-API-Key` header instead. It works on every protected route and acts as the user who created it. Create one from the command line:
+
+```bash
+python -m app.create_api_key alice n8n
+# in Docker:
+docker compose exec api python -m app.create_api_key alice n8n
+```
+
+You can also create one from a logged-in session with `POST /auth/api-keys {"name": "n8n"}`. The key (`rl_...`) is shown once. Only its hash is stored. `GET /auth/api-keys` lists your keys (name, prefix, last used, never the secret). `DELETE /auth/api-keys/{key_id}` revokes one immediately. Managing keys needs a Bearer login, so a leaked key can't be used to mint more keys or to revoke the owner's other ones.
+
+```bash
+curl -H "X-API-Key: rl_..." http://127.0.0.1:8000/auth/me
+```
+
+### arXiv digests
+
+Three endpoints turn arXiv into a scheduled paper source:
+
+| Endpoint | What it does |
+|---|---|
+| `POST /papers/arxiv/search` | Newest arXiv submissions for some keywords and/or categories, leaving out papers this **feed** has already covered |
+| `POST /papers/arxiv/process` | Queues a report over up to `ARXIV_MAX_PAPERS_PER_RUN` (8) papers. The worker downloads their PDFs. Returns `{"job_id"}` like `/process` |
+| `POST /papers/seen` | Marks papers as covered by hand (ones you never want in a digest) |
+
+A **feed** is a name for one digest's history (`"daily-nlp"`, `"weekly-vision"`). Each feed remembers its own covered papers, per user. When a `/papers/arxiv/process` job **succeeds**, the worker marks the papers it actually included as seen in that feed. A failed run marks nothing, so its papers come back in the next search. Papers are tracked without their version, so `2410.01234v2` counts as covered once `v1` was.
+
+```bash
+KEY="X-API-Key: rl_..."
+
+# 1. What's new?
+curl -X POST http://127.0.0.1:8000/papers/arxiv/search -H "$KEY" -H "Content-Type: application/json" \
+  -d '{"keywords": ["retrieval augmented generation"], "categories": ["cs.CL", "cs.IR"], "days": 3, "feed": "daily-rag"}'
+# -> {"count": 5, "skipped_seen": 2, "papers": [{"arxiv_id", "title", "abstract", "authors", ...}],
+#     "arxiv_ids": ["2610.28340v1", ...]}       <- already capped to the per-run limit
+
+# 2. Report on them (instructions optional; the default is a per-paper summary)
+curl -X POST http://127.0.0.1:8000/papers/arxiv/process -H "$KEY" -H "Content-Type: application/json" \
+  -d '{"arxiv_ids": ["2610.28340v1", "2610.26730v1"], "feed": "daily-rag"}'
+# -> {"job_id": "...", "status": "queued"}
+
+# 3. Poll GET /jobs/{job_id}; when done, result.pdf_filename -> GET /download/{pdf_filename}
+#    result.arxiv = {"included": [...], "failed": ["<id>: <reason>", ...]}
+```
+
+Search fields: `keywords` (phrases, OR'd together), `categories` (OR'd together), `days` (default 3, `null` = any time), `max_results` (default 25, up to 100), `only_new` (default `true`), `feed`. At least one keyword or category is required. arXiv announces new papers about a day after they're submitted, so use `days` of 2–3 for a daily digest. Seen-tracking means the overlap doesn't repeat any papers.
+
+All arXiv traffic goes to `export.arxiv.org` (the host arXiv asks automated clients to use), at most one request every 3 seconds per process, as arXiv's API terms require. Note that a run takes roughly 3 seconds per paper longer than an upload-based one.
+
+### Daily digest on GitHub Actions (free, nothing to host)
+
+[`.github/workflows/daily-digest.yml`](.github/workflows/daily-digest.yml) runs [`app/daily_digest.py`](backend/app/daily_digest.py) on GitHub's servers every day at 03:30 UTC. It needs no API, Redis, worker or laptop. For each feed in [`digest.toml`](digest.toml) it searches arXiv, runs the pipeline on the papers that feed hasn't covered yet, and writes `digests/reports/<date>-<feed>.md` and `.pdf`. It commits those, plus `digests/seen.json`, back to the repo, and emails you the reports. GitHub Actions is free for public repositories. Private ones get 2,000 free minutes a month, and a run takes about 10–20 minutes.
+
+**One-time setup:**
+
+1. **Groq key:** GitHub repo → *Settings → Secrets and variables → Actions → New repository secret* → `GROQ_API_KEY`.
+2. **Gmail app password:** turn on 2-Step Verification for your Google account, then create an app password at <https://myaccount.google.com/apppasswords>. Your normal Gmail password won't work over SMTP.
+3. Add the secrets `SMTP_USER` (your Gmail address) and `SMTP_PASSWORD` (the 16-character app password). Optionally add `DIGEST_EMAIL_TO` if the email should go to a different address. Leave `SMTP_*` unset to skip email. The reports are still committed.
+4. Edit `digest.toml` with your topics. You can do this right on GitHub.
+5. Test it: *Actions → Daily arXiv digest → Run workflow*. Tick *dry run* first to see which papers it would pick without spending Groq quota.
+
+**Good to know:**
+
+- **No-new-papers days:** a day with nothing new sends no email. Set `email_when_nothing_new = true` to change that.
+- **Failures:** a failed feed doesn't stop the others. Its papers aren't marked seen, so they come back the next day. The run shows red, and GitHub emails you about failed workflow runs.
+- **Figure descriptions** are off in the workflow (`FIGURE_CAPTIONING_ENABLED: "false"`). Describing every figure costs one Groq vision call each, which is too slow on the free tier. Text, tables and figure captions are still used.
+- **If the push step fails** with a 403, set *Settings → Actions → General → Workflow permissions* to *Read and write*.
+- **Inactive repos:** GitHub turns off scheduled workflows in a public repo after 60 days without activity. The digest's own daily commits count as activity, but a long stretch with nothing new could still hit that limit. Re-enable it from the Actions tab if that happens.
+
+**Running it locally** (from `backend/`, with your `.env`):
+
+```bash
+python -m app.daily_digest --config ../digest.toml --state-dir ../digests --dry-run   # search only
+CELERY_TASK_ALWAYS_EAGER=true FIGURE_CAPTIONING_ENABLED=false \
+  python -m app.daily_digest --config ../digest.toml --state-dir ../digests --no-email
+```
 
 ### Frontend
 
