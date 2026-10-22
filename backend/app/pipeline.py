@@ -200,21 +200,33 @@ def _hop_detail(hops: list[dict]) -> str:
 
 
 def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str,
-                 username: str | None = None, run_id: str | None = None) -> dict:
+                 username: str | None = None, run_id: str | None = None, *,
+                 extra_records: list[dict] | None = None, intent: str | None = None,
+                 export_pdf: bool = True) -> dict:
     """Runs every stage (see _run_pipeline) and always drops the run's
-    vector collection afterwards, even if a stage failed."""
+    vector collection afterwards, even if a stage failed.
+
+    For callers that know more than the instructions say (the daily digest):
+      extra_records  records shaped like doc_parser's, placed BEFORE the
+                     parsed files -- e.g. a paper's arXiv abstract, which
+                     then becomes the first chunk of that paper
+      intent         skip intent classification and use this one
+      export_pdf     False when the caller lays out its own PDF
+    """
     collections: list = []
     try:
-        return _run_pipeline(file_paths, seed_urls, instructions, username, run_id, collections)
+        return _run_pipeline(file_paths, seed_urls, instructions, username, run_id, collections,
+                             extra_records or [], intent, export_pdf)
     finally:
         for collection in collections:
             vectorstore.drop_session_collection(collection)
 
 
 def _run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str,
-                  username: str | None, run_id: str | None, collections: list) -> dict:
+                  username: str | None, run_id: str | None, collections: list,
+                  extra_records: list[dict], forced_intent: str | None, export_pdf: bool) -> dict:
     report = evaluation.EvaluationReport()
-    all_records: list[dict] = []
+    all_records: list[dict] = list(extra_records)
 
     # --- Stage 1: parse uploaded files ---
     with report.timed_stage("extraction"):
@@ -304,10 +316,10 @@ def _run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str
         for c in chunks:
             chunks_by_source.setdefault(c["source_name"], []).append(c)
 
-        intent = groq_client.classify_intent(instructions)
+        intent = forced_intent or groq_client.classify_intent(instructions)
         report.add_check(
             "retrieval", "intent", True,
-            f"Classified as '{intent}' -- "
+            f"{'Set by the caller to' if forced_intent else 'Classified as'} '{intent}' -- "
             + {
                 "summary": "sampling chunks spread across each document's full span, not by similarity.",
                 "targeted_qa": "hybrid vector + BM25 retrieval (RRF-fused), then reranked.",
@@ -381,8 +393,8 @@ def _run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str
             trimmed = sum(
                 1 for name in source_names for excerpt, original in zip(
                     samples.get(name, []),
-                    chunker.sample_representative(summary_chunks_by_source[name],
-                                                  len(samples.get(name, []))),
+                    chunker.sample_for_summary(summary_chunks_by_source[name],
+                                               len(samples.get(name, []))),
                 ) if excerpt["text"] != original["text"]
             )
             too_thin = excerpt_cap < SUMMARY_MIN_EXCERPT_TOKENS and trimmed > 0
@@ -395,13 +407,13 @@ def _run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str
                 f"says little. Summarize fewer documents per run or raise "
                 f"GROQ_MAX_CONTEXT_TOKENS."
                 if too_thin
-                else f"{len(sampled)} excerpt(s) at evenly spaced positions ({sizes_text}); "
+                else f"{len(sampled)} excerpt(s) at section-anchored and evenly spaced positions ({sizes_text}); "
                      f"{trimmed} trimmed to ~{excerpt_cap} tokens (a typical chunk is "
                      f"~{typical}) so all of them fit the {GROQ_MAX_CONTEXT_TOKENS}-token "
                      f"budget. A summary needs to see how each document begins, develops "
                      f"and ends more than it needs any one passage whole."
                 if trimmed
-                else f"{len(sampled)} whole chunk(s) at evenly spaced positions ({sizes_text}) "
+                else f"{len(sampled)} whole chunk(s) at section-anchored and evenly spaced positions ({sizes_text}) "
                      f"fit the {GROQ_MAX_CONTEXT_TOKENS}-token budget without trimming.",
                 value=len(sampled),
             )
@@ -520,18 +532,18 @@ def _run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str
     )
 
     # --- Stage 9: PDF export ---
+    # Numbered by the report's own [n] markers -- see groq_client.numbered_citations.
+    citations = groq_client.numbered_citations(generation_result["report_text"], retrieved)
     pdf_path = None
     with report.timed_stage("pdf_export"):
-        if generation_result["report_text"]:
+        if generation_result["report_text"] and export_pdf:
             filename = f"report_{uuid.uuid4().hex[:8]}.pdf"
-            pdf_path = pdf_export.build_pdf(
-                generation_result["report_text"], generation_result["citations_used"], filename
-            )
+            pdf_path = pdf_export.build_pdf(generation_result["report_text"], citations, filename)
             # Verify against the SAME sanitization pdf_export just applied,
             # so this checks the actual rendered output, not the raw input.
             evaluation.validate_pdf_encoding_safety(
                 pdf_export._sanitize_for_pdf(generation_result["report_text"]),
-                [pdf_export._sanitize_for_pdf(c) for c in generation_result["citations_used"]],
+                [pdf_export._sanitize_for_pdf(c["label"]) for c in citations],
                 report,
             )
 
@@ -545,6 +557,9 @@ def _run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str
         "retrieved_chunks": retrieved,
         "report_text": generation_result["report_text"],
         "citations_used": generation_result["citations_used"],
+        # [{"n": 4, "label": ...}] in marker order -- what a printed source
+        # list needs (citations_used has no numbers).
+        "citations": citations,
         "claim_verdicts": claim_verdicts,
         "pdf_path": pdf_path,
         # Just the filename, OS-agnostic -- the frontend uses this directly

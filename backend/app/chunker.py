@@ -12,7 +12,7 @@ carries the rest through untouched.
 
 import re
 
-from .config import CHUNK_SIZE_WORDS, CHUNK_OVERLAP_RATIO
+from .config import CHUNK_SIZE_WORDS, CHUNK_OVERLAP_RATIO, SUMMARY_SECTION_AWARE
 
 
 def _label_for(record: dict) -> str:
@@ -133,21 +133,119 @@ def sample_representative(chunks: list[dict], k: int) -> list[dict]:
     """
     if len(chunks) <= k:
         return list(chunks)
+    return [chunks[i] for i in _even_indices(len(chunks), k)]
+
+
+def _even_indices(n: int, k: int) -> list[int]:
+    """k indices into range(n), evenly spaced, both ends included."""
     if k <= 0:
         return []
-
+    if k >= n:
+        return list(range(n))
     if k == 1:
         indices = [0]
     else:
-        last = len(chunks) - 1
+        last = n - 1
         indices = sorted({round(i * last / (k - 1)) for i in range(k)})
     if len(indices) < k:
         # Rounding collisions (two computed positions landed on the same
         # index) can leave us short of k -- top up with the next unused
         # indices so the caller reliably gets k chunks back.
-        remaining = [i for i in range(len(chunks)) if i not in indices]
+        remaining = [i for i in range(n) if i not in indices]
         indices = sorted(indices + remaining[: k - len(indices)])
-    return [chunks[i] for i in indices]
+    return indices
+
+
+# ---------- Section anchors (for "summary" sampling) ----------
+#
+# Chunks are whitespace-joined, so a heading survives only as inline text:
+# "... as shown above. 5 Results Table 2 compares ...". A heading is taken
+# to be one of these names, capitalised, either numbered ("5 Results",
+# "4.2 Limitations", "VI. CONCLUSION") or in capitals, and followed by a
+# capitalised word -- prose ("our results show", "limitations of this") has
+# neither the number nor the capital. Unnumbered "Limitations" is accepted
+# too, since ACL-style papers put that section after the conclusion with no
+# number.
+
+_SECTION_NAMES = {
+    "results": r"(?:Main\s+|Experimental\s+|Empirical\s+)?(?:Results|Experiments|Evaluation|Findings)",
+    "limitations": r"Limitations|Threats\s+to\s+Validity",
+    "conclusion": r"Conclusions?|Discussion|Concluding\s+Remarks",
+}
+_SECTION_NUMBER = r"(?:\d{1,2}(?:\.\d{1,2})?\.?|[IVX]{1,5}\.?)"
+
+
+def _heading_pattern(names: str, allow_unnumbered: bool) -> re.Pattern:
+    # "Results and Discussion", "Conclusion and Future Work": the lowercase
+    # "and" would otherwise fail the capitalised-next-word check.
+    names = rf"(?:{names})(?:\s+and\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)?"
+    numbered = rf"{_SECTION_NUMBER}\s+(?:{names})"
+    upper = rf"(?:{names.upper().replace(r'\S', r'\s')})"
+    options = [numbered, upper] + ([rf"(?:{names})"] if allow_unnumbered else [])
+    return re.compile(rf"(?:^|(?<=\s))(?:{'|'.join(options)})(?=:?\s+[A-Z(\[])")
+
+
+_SECTION_PATTERNS = {
+    kind: _heading_pattern(names, allow_unnumbered=(kind == "limitations"))
+    for kind, names in _SECTION_NAMES.items()
+}
+# Order matters when there are fewer slots than anchors: a summary without
+# results is the worst kind, one without the conclusion the least bad (the
+# abstract and introduction usually state the conclusion already).
+_ANCHOR_PRIORITY = ("results", "limitations", "conclusion")
+
+
+def section_anchors(chunks: list[dict]) -> dict[str, tuple[int, int]]:
+    """{kind: (index into chunks, character offset of the heading)} for the
+    first chunk where each section starts. Kinds with no heading found are
+    left out."""
+    anchors: dict[str, tuple[int, int]] = {}
+    for kind, pattern in _SECTION_PATTERNS.items():
+        for i, chunk in enumerate(chunks):
+            match = pattern.search(chunk["text"])
+            if match:
+                anchors[kind] = (i, match.start())
+                break
+    return anchors
+
+
+def sample_for_summary(chunks: list[dict], k: int) -> list[dict]:
+    """
+    k chunks for a "summary": the first and last content chunk, then the
+    chunks where the Results, Limitations and Conclusion sections start
+    (SUMMARY_SECTION_AWARE), then evenly spaced positions for the rest --
+    in reading order. An anchored chunk is returned as a copy whose text
+    starts at its heading, so trimming it to an excerpt keeps the section
+    rather than the end of the one before it.
+
+    With no headings found (or the setting off) this is exactly
+    sample_representative.
+    """
+    if len(chunks) <= k or not SUMMARY_SECTION_AWARE:
+        return sample_representative(chunks, k)
+    if k <= 0:
+        return []
+
+    anchors = section_anchors(chunks)
+    offsets = {index: offset for index, offset in anchors.values()}
+    chosen: list[int] = []
+    for index in [0, len(chunks) - 1] + [anchors[kind][0] for kind in _ANCHOR_PRIORITY if kind in anchors]:
+        if index not in chosen and len(chosen) < k:
+            chosen.append(index)
+    spacing = k
+    while len(chosen) < k:
+        for index in _even_indices(len(chunks), spacing):
+            if index not in chosen and len(chosen) < k:
+                chosen.append(index)
+        spacing += 1
+
+    picked = []
+    for index in sorted(chosen):
+        chunk = chunks[index]
+        if offsets.get(index):
+            chunk = {**chunk, "text": chunk["text"][offsets[index]:]}
+        picked.append(chunk)
+    return picked
 
 
 # ---------- Back matter (for "summary" sampling) ----------
@@ -298,7 +396,7 @@ def plan_summary_excerpts(chunks_by_source: dict[str, list[dict]], max_per_sourc
             break
         sizes[max(growable, key=spacing)] += 1
 
-    samples = {name: sample_representative(sources[name], sizes[name]) for name in sources}
+    samples = {name: sample_for_summary(sources[name], sizes[name]) for name in sources}
     lengths = [estimate_tokens(c["text"]) for sample in samples.values() for c in sample]
     cap = _water_fill_cap(lengths, max_tokens)
     # estimate_tokens is len // 4 + 1, so (cap - 1) * 4 characters stays within cap.

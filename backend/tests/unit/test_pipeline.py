@@ -22,7 +22,7 @@ def _chunks_for(source_name: str, n: int, topic: str, chunk_chars: int = 0) -> l
     ]
 
 
-def _run(all_chunks, intent, instructions="Discuss the topic", **overrides):
+def _run(all_chunks, intent, instructions="Discuss the topic", run_kwargs=None, **overrides):
     """Runs the pipeline with everything mocked except the logic under
     test. `overrides` lets individual tests replace specific mocks."""
     fake_collection = MagicMock()
@@ -50,7 +50,8 @@ def _run(all_chunks, intent, instructions="Discuss the topic", **overrides):
     defaults.update(overrides)
 
     with patch("app.doc_parser.parse_document", return_value=defaults["doc_parser_parse_document"]), \
-         patch("app.chunker.chunk_all", return_value=defaults["chunk_all"]), \
+         patch("app.chunker.chunk_all", side_effect=defaults["chunk_all"] if callable(defaults["chunk_all"])
+               else lambda records: defaults["chunk_all"]), \
          patch("app.vectorstore.new_session_collection", return_value=defaults["new_session_collection"]), \
          patch("app.vectorstore.add_chunks", return_value=None), \
          patch("app.vectorstore.retrieve_candidates", side_effect=fake_retrieve_candidates), \
@@ -60,7 +61,7 @@ def _run(all_chunks, intent, instructions="Discuss the topic", **overrides):
          patch("app.reranker.rerank_with_fallback", side_effect=defaults["rerank_with_fallback"]), \
          patch("app.groq_client.generate_report", side_effect=defaults["generate_report"] if callable(defaults["generate_report"]) else lambda *a, **k: defaults["generate_report"]), \
          patch("app.pdf_export.build_pdf", return_value=defaults["build_pdf"]),          patch("app.groq_client.plan_follow_up", side_effect=defaults["plan_follow_up"]),          patch("app.groq_client.judge_claims", side_effect=defaults["judge_claims"]),          patch("app.groq_client.revise_claims", side_effect=defaults["revise_claims"]):
-        return pipeline.run_pipeline(file_paths=[], seed_urls=[], instructions=instructions)
+        return pipeline.run_pipeline(file_paths=[], seed_urls=[], instructions=instructions, **(run_kwargs or {}))
 
 
 # ---------- Query decomposition wiring ----------

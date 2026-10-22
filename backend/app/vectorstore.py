@@ -21,6 +21,12 @@ def _get_embedder() -> SentenceTransformer:
     return _embedder
 
 
+def embed(texts: list[str]) -> list[list[float]]:
+    """Unit-length embeddings from the same local model, so a dot product
+    is cosine similarity. No API calls."""
+    return _get_embedder().encode(texts, normalize_embeddings=True).tolist()
+
+
 def get_client() -> chromadb.Client:
     # EphemeralClient instances share one in-memory store per process, so
     # collections outlive the client object -- drop_session_collection is

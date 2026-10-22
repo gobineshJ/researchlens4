@@ -343,7 +343,16 @@ All arXiv traffic goes to `export.arxiv.org` (the host arXiv asks automated clie
 
 ### Daily digest on GitHub Actions (free, nothing to host)
 
-[`.github/workflows/daily-digest.yml`](.github/workflows/daily-digest.yml) runs [`app/daily_digest.py`](backend/app/daily_digest.py) on GitHub's servers every day at 03:30 UTC. It needs no API, Redis, worker or laptop. For each feed in [`digest.toml`](digest.toml) it searches arXiv, runs the pipeline on the papers that feed hasn't covered yet, and writes `digests/reports/<date>-<feed>.md` and `.pdf`. It commits those, plus `digests/seen.json`, back to the repo, and emails you the reports. GitHub Actions is free for public repositories. Private ones get 2,000 free minutes a month, and a run takes about 10–20 minutes.
+[`.github/workflows/daily-digest.yml`](.github/workflows/daily-digest.yml) runs [`app/daily_digest.py`](backend/app/daily_digest.py) on GitHub's servers every day at 03:30 UTC. It needs no API, Redis, worker or laptop. It writes `digests/reports/<date>-<feed>.md` and `.pdf`, commits them and `digests/seen.json` back to the repo, and emails you. GitHub Actions is free for public repositories. Private ones get 2,000 free minutes a month, and a run takes about 10–20 minutes.
+
+**How each feed's report is built** (all within Groq's free tier):
+
+1. **Search:** arXiv for the feed's keywords and categories over the last `days` days, leaving out papers already in `seen.json`.
+2. **Rank:** each paper's title and abstract are compared with the feed's `topic` using the local embedding model (no API calls). The best `max_papers` papers above `min_relevance` are kept, and every score is printed in the run log.
+3. **Summarize each paper on its own:** each paper gets its own pipeline run and the whole context budget. Its **arXiv abstract** is added as the first source, and excerpts are taken from where its **Results, Limitations and Conclusion** sections start (found from their headings) as well as from evenly spaced points. Each summary opens with a **TL;DR** and covers problem, method, key results (with numbers) and limitations. Every cited sentence is checked against its excerpt, and flagged ones are rewritten.
+4. **Combine:** one more call reads the summaries and writes the **Themes** the papers share and picks the paper **worth reading in full**. Theme sentences are checked against the paper summaries in the same way. The report says how many were checked and how many were corrected.
+
+Roughly 60–80K tokens a day for 5 papers, spread across two models that each allow 200K a day. Each paper takes 30–60 seconds, mostly waiting on Groq's per-minute limit.
 
 **One-time setup:**
 
@@ -356,7 +365,8 @@ All arXiv traffic goes to `export.arxiv.org` (the host arXiv asks automated clie
 **Good to know:**
 
 - **No-new-papers days:** a day with nothing new sends no email. Set `email_when_nothing_new = true` to change that.
-- **Failures:** a failed feed doesn't stop the others. Its papers aren't marked seen, so they come back the next day. The run shows red, and GitHub emails you about failed workflow runs.
+- **Failures:** a paper that fails is listed under "Not included" and the rest of its feed still goes out. A feed where every paper fails doesn't stop the other feeds, but the run shows red and GitHub emails you about it. Papers that weren't summarized aren't marked seen, so they come back the next day.
+- **Papers below the cut** (low relevance, or past `max_papers`) aren't marked seen either. They can still make it on a quieter day while they're inside the `days` window.
 - **Figure descriptions** are off in the workflow (`FIGURE_CAPTIONING_ENABLED: "false"`). Describing every figure costs one Groq vision call each, which is too slow on the free tier. Text, tables and figure captions are still used.
 - **If the push step fails** with a 403, set *Settings → Actions → General → Workflow permissions* to *Read and write*.
 - **Inactive repos:** GitHub turns off scheduled workflows in a public repo after 60 days without activity. The digest's own daily commits count as activity, but a long stretch with nothing new could still hit that limit. Re-enable it from the Actions tab if that happens.
