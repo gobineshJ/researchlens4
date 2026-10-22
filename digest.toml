@@ -5,16 +5,22 @@
 # Each [[feed]] becomes one report (Markdown + PDF in digests/reports/) and
 # remembers its own covered papers in digests/seen.json, so nothing repeats.
 #
-#   keywords      phrases searched in title/abstract/etc., OR'd together
-#   categories    arXiv categories (https://arxiv.org/category_taxonomy), OR'd
-#                 together; AND'ed with keywords when both are given
-#   days          only papers submitted in the last N days. arXiv announces
-#                 papers about a day after submission, so keep this >= 2;
-#                 seen.json stops the overlap from repeating anything.
-#   max_papers    papers per report (1-8). They share one context budget on
-#                 Groq's free tier, so fewer papers = more detail on each.
-#   max_results   how many of the newest matches to look through (1-100)
-#   instructions  what the report should do (default: per-paper summary)
+#   keywords       phrases searched in title/abstract/etc., OR'd together
+#   categories     arXiv categories (https://arxiv.org/category_taxonomy), OR'd
+#                  together; AND'ed with keywords when both are given
+#   topic          one sentence on what you care about. Papers are ranked by
+#                  how close their abstract is to it (keywords if no topic),
+#                  and the best max_papers are summarised.
+#   days           only papers submitted in the last N days. arXiv announces
+#                  papers about a day after submission, so keep this >= 2;
+#                  seen.json stops the overlap from repeating anything.
+#   max_papers     papers per report (1-8). Each one is summarised on its own,
+#                  so more papers = a longer run, not shallower summaries.
+#   max_results    how many of the newest matches to rank (1-100)
+#   min_relevance  skip papers scoring below this (0-1; default 0.20). On-topic
+#                  papers typically score 0.35-0.6. The scores are in the run log.
+#   instructions   how to summarise each paper (default: TL;DR, problem,
+#                  method, key results with numbers, limitations)
 
 # Send an email even on days when no feed found anything new.
 email_when_nothing_new = false
@@ -28,11 +34,12 @@ max_results = 50
 name = "rag"
 keywords = ["retrieval augmented generation", "retrieval-augmented"]
 categories = ["cs.CL", "cs.IR", "cs.AI"]
+topic = "Retrieval-augmented generation: retrieval quality, grounding and faithfulness, evaluation benchmarks, and RAG system design."
 
 # Another example -- uncomment and edit:
 # [[feed]]
 # name = "llm-agents"
 # keywords = ["LLM agent", "tool use"]
 # categories = ["cs.AI", "cs.CL"]
+# topic = "LLM agents that plan and use tools, and how they are evaluated."
 # max_papers = 4
-# instructions = "For each paper: what the agent does, how it was evaluated, and the headline result."

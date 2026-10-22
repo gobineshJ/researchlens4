@@ -915,6 +915,73 @@ def citations_for(report_text: str, chunks: list[dict]) -> list[str]:
     return [chunks[i - 1]["source_label"] for i in cited_indices(report_text, len(chunks))]
 
 
+def numbered_citations(report_text: str, chunks: list[dict]) -> list[dict]:
+    """
+    [{"n": 4, "label": "paper.pdf, page 9"}, ...] for every excerpt the
+    report cites, keyed by the [n] marker itself and sorted by it -- what a
+    printed source list needs. citations_for is in first-cited order with no
+    numbers, so printing it as 1, 2, 3... misnumbers every source after a
+    marker the report skipped ([1] [2] [4] -> the third entry printed as
+    "[3]" is really [4]) or cited out of order.
+    """
+    return [{"n": i, "label": chunks[i - 1]["source_label"]}
+            for i in sorted(cited_indices(report_text, len(chunks)))]
+
+
+DIGEST_SUMMARY_CHARS = 2400
+# Per paper, when synthesising a digest -- five summaries plus the prompt
+# and the answer stay well inside one request on the free tier's 8K TPM.
+
+
+def synthesize_digest(topic: str, papers: list[dict]) -> dict:
+    """
+    The cross-paper part of a digest, from the per-paper summaries already
+    written (each grounded in its own paper's excerpts):
+
+      papers: [{"title": ..., "summary": ...}, ...]   (numbered P1, P2, ...)
+
+    Returns {"themes": str, "read_in_full": int | None, "why": str} --
+    `themes` cites papers as [P1], [P3]; `read_in_full` is the 1-based
+    number of the one paper most worth reading in full for `topic`.
+    Raises on failure; the digest is still useful without this part.
+    """
+    # Each summary's own [n] markers point into its paper's excerpts, which
+    # this request doesn't have -- and would read as paper numbers.
+    listing = "\n\n".join(
+        f"[P{i}] {p['title']}\n"
+        f"{_CITATION_MARKER.sub('', normalize_citations(p['summary']))[:DIGEST_SUMMARY_CHARS]}"
+        for i, p in enumerate(papers, start=1)
+    )
+    system_prompt = (
+        "You write the overview section of a daily research-paper digest. You get "
+        "summaries of new papers, numbered [P1], [P2], ... Use ONLY what the "
+        "summaries say.\n"
+        "1. themes: 2-4 short paragraphs on what these papers have in common or "
+        "where they disagree -- shared problems, competing approaches, recurring "
+        "datasets or evaluation gaps. Be specific: name the methods, numbers and "
+        "papers involved. Refer to a paper by a short name (e.g. its system or "
+        "benchmark name) and put its citation at the END of each sentence, before "
+        "the full stop, like: 'RAG-NIMBF finds MMR lifts nDCG@5 by 11 points [P1].' "
+        "Never start a sentence with a citation. Skip anything that would "
+        "be true of almost any set of papers (e.g. 'all papers note limitations'). "
+        "If the papers share little, say so briefly and describe what is distinct "
+        "about the most notable ones instead.\n"
+        "2. read_in_full: the number of the ONE paper most worth reading in full "
+        "for someone following the topic below, and why in one or two sentences.\n"
+        'Respond ONLY with JSON: {"themes": "...", "read_in_full": 2, "why": "..."}'
+    )
+    user_prompt = f"Topic: {topic}\n\nPaper summaries:\n\n{listing}"
+    raw = _call_groq(GROQ_GENERATION_MODEL, system_prompt, user_prompt, json_mode=True,
+                     temperature=0.2, reasoning_effort="low", max_completion_tokens=3000)
+    parsed = json.loads(raw)
+    themes = str(parsed.get("themes", "")).strip()
+    if not themes:
+        raise ValueError("The digest synthesis came back without themes.")
+    pick = parsed.get("read_in_full")
+    pick = pick if isinstance(pick, int) and 1 <= pick <= len(papers) else None
+    return {"themes": themes, "read_in_full": pick, "why": str(parsed.get("why", "")).strip() if pick else ""}
+
+
 DRAFT_UPDATE_SECONDS = 0.75
 
 

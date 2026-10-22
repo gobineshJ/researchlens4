@@ -8,18 +8,26 @@ so nothing has to stay running anywhere:
 For every [[feed]] in the config:
   1. search arXiv for its keywords/categories over the last `days` days
   2. drop papers this feed already covered (state-dir/seen.json)
-  3. download up to `max_papers` PDFs and run the normal pipeline on them
-  4. write state-dir/reports/<date>-<feed>.md and .pdf
-  5. record the papers as covered -- only after the report was written
-Then one email with every feed's report attached (when SMTP_* is set).
+  3. rank the rest by relevance to the feed's topic -- the local embedding
+     model against title + abstract, no API calls -- and keep the best
+     `max_papers` that clear `min_relevance`
+  4. summarise EACH paper in its own pipeline run ("summary" mode, its
+     arXiv abstract as an extra source, section-aware excerpts), so every
+     paper gets the whole context budget instead of a fifth of it
+  5. one more Groq call reads those summaries and writes the themes they
+     share plus the one paper most worth reading in full
+  6. write state-dir/reports/<date>-<feed>.md and .pdf, then record the
+     papers that made it in as covered
+Then one email with every feed's overview, the PDFs attached (when SMTP_* is set).
 
 The state dir is plain files on purpose: the workflow commits it back to
 the repo, which is what carries "already covered" from one run to the next.
 
-A feed that fails doesn't stop the others; the exit code is 1 if any feed
-or the email failed, so the workflow run shows red (and GitHub emails you).
+A feed that fails doesn't stop the others, and one paper that fails doesn't
+stop its feed; the exit code is 1 if a whole feed or the email failed, so
+the workflow run shows red (and GitHub emails you).
 
-    --dry-run    search only: print what would be processed, change nothing
+    --dry-run    search and rank only: print what would be processed, change nothing
     --no-email   write reports and state, but don't send the email
 """
 
@@ -27,7 +35,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import smtplib
 import sys
 import tempfile
@@ -37,9 +44,12 @@ from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
 
-from . import config, papers, progress
+from . import config, groq_client, papers, pdf_export, progress
 
 _FEED_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+# "TL;DR: ...", "**TL;DR:** ...", "TLDR - ..." -- only trailing ** is stripped,
+# so a closing citation like "[1]." survives.
+_TLDR = re.compile(r"^\W*TL\s*;?\s*DR\W*?[:\-]\W*\s*(.+?)[\s*]*$", re.IGNORECASE)
 
 
 @dataclass
@@ -47,10 +57,18 @@ class Feed:
     name: str
     keywords: list[str] = field(default_factory=list)
     categories: list[str] = field(default_factory=list)
+    topic: str = ""
     days: int | None = 3
     max_papers: int = 5
     max_results: int = 50
-    instructions: str = config.ARXIV_DEFAULT_INSTRUCTIONS
+    min_relevance: float = config.DIGEST_MIN_RELEVANCE
+    instructions: str = config.DIGEST_PAPER_INSTRUCTIONS
+
+    @property
+    def topic_text(self) -> str:
+        """What relevance is measured against: the feed's `topic` sentence,
+        else its keywords. Empty for a categories-only feed (no ranking)."""
+        return self.topic.strip() or "; ".join(k.strip() for k in self.keywords if k.strip())
 
 
 @dataclass
@@ -60,14 +78,30 @@ class DigestConfig:
 
 
 @dataclass
+class PaperSummary:
+    paper: dict
+    relevance: float | None
+    tldr: str
+    body: str
+    citations: list[dict]   # [{"n", "label"}], numbered by this summary's own markers
+
+
+@dataclass
 class FeedResult:
     feed: str
-    papers: list[dict] = field(default_factory=list)     # the papers the report covers
-    failed_downloads: list[str] = field(default_factory=list)
+    summaries: list[PaperSummary] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)       # "id: reason", downloads and summaries
+    themes: str = ""
+    themes_note: str = ""                                 # what check_themes did
+    read_in_full: int | None = None                       # 1-based index into summaries
+    why: str = ""
     markdown_path: Path | None = None
     pdf_path: Path | None = None
-    report_text: str = ""
     error: str = ""
+
+    @property
+    def papers(self) -> list[dict]:
+        return [s.paper for s in self.summaries]
 
 
 # --- config + state ---
@@ -89,6 +123,8 @@ def load_config(path: str | Path) -> DigestConfig:
             raise ValueError(f"Feed {feed.name!r}: max_papers must be 1-{config.ARXIV_MAX_PAPERS_PER_RUN}.")
         if not 1 <= feed.max_results <= 100:
             raise ValueError(f"Feed {feed.name!r}: max_results must be 1-100.")
+        if not -1 <= feed.min_relevance <= 1:
+            raise ValueError(f"Feed {feed.name!r}: min_relevance must be between -1 and 1.")
         papers.build_query(feed.keywords, feed.categories, feed.days)  # raises on a bad query
         feeds.append(feed)
     if not feeds:
@@ -112,65 +148,278 @@ def save_seen(path: Path, seen: dict[str, dict[str, str]]) -> None:
     path.write_text(json.dumps(seen, indent=1, sort_keys=True) + "\n", encoding="utf-8")
 
 
-# --- one feed ---
-
 def _log(text: str) -> None:
     print(text, flush=True)
 
 
-def find_new_papers(feed: Feed, seen_ids: set[str]) -> tuple[int, list[dict]]:
+# --- choosing papers ---
+
+def find_new_papers(feed: Feed, seen_ids: set[str]) -> list[dict]:
     query = papers.build_query(feed.keywords, feed.categories, feed.days)
     _log(f"[{feed.name}] arXiv query: {query}")
     total, found = papers.search_arxiv(query, max_results=feed.max_results)
     new = [p for p in found if p["id"] not in seen_ids]
     _log(f"[{feed.name}] {total} matching, {len(found)} fetched, {len(new)} not covered yet")
-    return total, new[:feed.max_papers]
+    return new
 
 
-def _markdown(feed: Feed, day: str, included: list[dict], result: dict, failed: list[str]) -> str:
-    lines = [f"# {feed.name} -- {day}", "", f"## Papers ({len(included)})", ""]
-    for p in included:
-        authors = ", ".join(p["authors"][:4]) + (" et al." if len(p["authors"]) > 4 else "")
-        lines.append(f"- **{p['title']}** -- {authors} ([arXiv {p['arxiv_id']}]({p['abs_url']}))")
-    if failed:
-        lines += ["", "Could not include: " + "; ".join(failed)]
-    lines += ["", "## Report", "", result["report_text"].strip()]
-    if result.get("citations_used"):
-        lines += ["", "## Sources", ""] + [f"{i}. {c}" for i, c in enumerate(result["citations_used"], 1)]
-    return "\n".join(lines) + "\n"
+def relevance_scores(topic: str, candidates: list[dict]) -> list[float]:
+    """Cosine similarity of each paper's title + abstract to `topic`."""
+    from . import vectorstore  # loads the embedding model; --dry-run on a categories-only feed skips it
+    vectors = vectorstore.embed([topic] + [f"{p['title']}. {p['abstract']}" for p in candidates])
+    query = vectors[0]
+    return [sum(a * b for a, b in zip(query, v)) for v in vectors[1:]]
 
 
-def run_feed(feed: Feed, new_papers: list[dict], reports_dir: Path, day: str) -> FeedResult:
+def choose_papers(feed: Feed, candidates: list[dict]) -> list[tuple[float | None, dict]]:
+    """
+    The papers worth summarising today: most relevant first, at most
+    max_papers, none below min_relevance. A categories-only feed has nothing
+    to rank against, so it keeps arXiv's newest-first order.
+
+    Papers left out are not marked seen: one that just missed the cut can
+    still make it on a quieter day while it's inside the `days` window.
+    """
+    if not candidates:
+        return []
+    topic = feed.topic_text
+    if not topic:
+        return [(None, p) for p in candidates[:feed.max_papers]]
+    ranked = sorted(zip(relevance_scores(topic, candidates), candidates), key=lambda sp: sp[0], reverse=True)
+    for score, paper in ranked:
+        mark = "keep" if score >= feed.min_relevance else "skip"
+        _log(f"[{feed.name}]   {score:.2f} {mark} {paper['arxiv_id']}: {paper['title'][:90]}")
+    kept = [(score, paper) for score, paper in ranked if score >= feed.min_relevance]
+    if len(kept) < len(ranked):
+        _log(f"[{feed.name}] {len(ranked) - len(kept)} below min_relevance {feed.min_relevance}")
+    return kept[:feed.max_papers]
+
+
+# --- summarising ---
+
+def abstract_record(paper: dict, filename: str) -> dict:
+    """The paper's arXiv metadata as an extra source for its pipeline run,
+    filed under the same document as its PDF so it becomes that paper's
+    first chunk -- the densest statement of what the paper claims."""
+    authors = ", ".join(paper["authors"])
+    return {
+        "source_type": "file",
+        "filename": filename,
+        "location": "arXiv abstract",
+        "text": f"Title: {paper['title']}. Authors: {authors}. Abstract: {paper['abstract']}",
+    }
+
+
+def split_tldr(text: str) -> tuple[str, str]:
+    """('one sentence', rest of the summary) when the summary opens with a
+    'TL;DR: ...' line as instructed, else ('', text)."""
+    lines = text.strip().splitlines()
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+        match = _TLDR.match(line.strip())
+        if match:
+            return match.group(1).strip(), "\n".join(lines[i + 1:]).strip()
+        break
+    return "", text.strip()
+
+
+def summarize_paper(feed: Feed, paper: dict, relevance: float | None, pdf_path: str, day: str) -> PaperSummary:
     # Imported here so --dry-run doesn't load the embedding and reranker models.
     from .pipeline import run_pipeline
 
+    output = run_pipeline(
+        [pdf_path], [], feed.instructions, run_id=f"digest-{feed.name}-{day}-{paper['id']}",
+        extra_records=[abstract_record(paper, Path(pdf_path).name)], intent="summary", export_pdf=False,
+    )
+    if not output.get("report_text"):
+        raise RuntimeError("the pipeline produced no summary")
+    tldr, body = split_tldr(output["report_text"])
+    return PaperSummary(paper, relevance, tldr, body, output.get("citations", []))
+
+
+_PAPER_MARKER = re.compile(r"\[(P\d+(?:\s*[,–-]\s*P?\d+)*)\]")
+_NUMBER_MARKER = re.compile(r"\[(\d+(?:\s*[,–-]\s*\d+)*)\]")
+_LEADING_PAPER_MARKER = re.compile(r"^(\[(P\d+(?:\s*[,–-]\s*P?\d+)*)\])\s+")
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+(?=\S)")
+
+
+def markers_to_sentence_ends(text: str) -> str:
+    """
+    "[P1] introduces X." -> "P1 introduces X [P1]."
+
+    The claim checker reads a marker at the START of a sentence as the tail
+    of the sentence before it ("... improved. [2]" is a common way to cite),
+    so a sentence opening with its citation would be judged against the
+    wrong paper -- and removing the previous sentence would take that
+    paper's marker with it. Moving the marker to the end keeps each
+    sentence and its paper together.
+    """
+    paragraphs = []
+    for paragraph in text.split("\n\n"):
+        sentences = []
+        for sentence in _SENTENCE_BREAK.split(paragraph.strip()):
+            match = _LEADING_PAPER_MARKER.match(sentence)
+            if match:
+                marker, papers_cited = match.group(1), match.group(2)
+                rest = sentence[match.end():]
+                end = len(rest.rstrip()) - (1 if rest.rstrip()[-1:] in ".!?" else 0)
+                tail = "" if marker in rest else f" {marker}"
+                sentence = f"{papers_cited} {rest[:end].rstrip()}{tail}{rest[end:]}"
+            sentences.append(sentence)
+        paragraphs.append(" ".join(sentences))
+    return "\n\n".join(paragraphs)
+
+
+def check_themes(themes: str, summaries: list[PaperSummary]) -> tuple[str, str]:
+    """
+    Holds the themes to the same standard as the summaries: every sentence
+    citing [P2] is judged against paper 2's summary by the entailment judge,
+    and flagged sentences are rewritten or removed by the same reviser the
+    pipeline uses. The summaries stand in as the "excerpts", [Pn] becomes
+    [n] for the checker and back afterwards.
+
+    Returns (themes to publish, a one-line note on what the check did).
+    Raises on request failures -- the caller then keeps the themes unchecked.
+    """
+    from . import evaluation
+
+    sources = [{"text": f"{s.paper['title']}\nTL;DR: {s.tldr}\n{s.body}"} for s in summaries]
+    themes = markers_to_sentence_ends(themes)
+    numbered = _PAPER_MARKER.sub(lambda m: "[" + m.group(1).replace("P", "") + "]", themes)
+    claims = evaluation.extract_cited_claims(numbered, len(sources))
+    if not claims:
+        return themes, "Themes cite no papers, so they could not be checked."
+    verdicts = groq_client.judge_claims(claims, sources)
+    flagged = [i for i, v in enumerate(verdicts) if v["verdict"] in ("unsupported", "contradicted")]
+    note = f"{len(claims)} theme sentence(s) checked against the paper summaries"
+    if flagged:
+        revisions = groq_client.revise_claims(
+            [{"claim": verdicts[i]["claim"], "sources": verdicts[i]["sources"], "reason": verdicts[i]["reason"]}
+             for i in flagged],
+            sources,
+        )
+        applied = [{**r, "span": claims[i]["span"]} for i, r in zip(flagged, revisions) if r is not None]
+        numbered = evaluation.apply_revisions(numbered, applied)
+        removed = sum(r["action"] == "remove" for r in applied)
+        note += f"; {len(applied) - removed} corrected, {removed} removed"
+    note += "."
+    restored = _NUMBER_MARKER.sub(
+        lambda m: "[" + re.sub(r"(\d+)", r"P\1", m.group(1)) + "]", numbered)
+    return restored, note
+
+
+def run_feed(feed: Feed, chosen: list[tuple[float | None, dict]], reports_dir: Path, day: str) -> FeedResult:
     result = FeedResult(feed=feed.name)
-    by_id = {p["arxiv_id"]: p for p in new_papers}
+    relevance = {p["arxiv_id"]: score for score, p in chosen}
+    by_id = {p["arxiv_id"]: p for _, p in chosen}
     with tempfile.TemporaryDirectory() as tmp:
         with progress.listening(lambda stage, detail: _log(f"[{feed.name}]   {stage}: {detail}" if detail
                                                            else f"[{feed.name}]   {stage}")):
-            pdfs, downloaded, result.failed_downloads = papers.download_arxiv_pdfs(list(by_id), tmp)
-            output = run_pipeline(pdfs, [], feed.instructions, run_id=f"digest-{feed.name}-{day}")
-    if not output.get("report_text"):
-        raise RuntimeError("The pipeline produced no report text.")
+            pdfs, downloaded, result.failed = papers.download_arxiv_pdfs(list(by_id), tmp)
+            for i, (arxiv_id, pdf) in enumerate(zip(downloaded, pdfs), start=1):
+                _log(f"[{feed.name}] summarising {i}/{len(pdfs)}: {arxiv_id}")
+                try:
+                    result.summaries.append(summarize_paper(feed, by_id[arxiv_id], relevance[arxiv_id], pdf, day))
+                except Exception as exc:
+                    _log(f"[{feed.name}] could not summarise {arxiv_id}: {type(exc).__name__}: {exc}")
+                    result.failed.append(f"{arxiv_id}: {type(exc).__name__}: {exc}")
+    if not result.summaries:
+        raise RuntimeError("No paper could be summarised -- " + "; ".join(result.failed))
 
-    result.papers = [by_id[i] for i in downloaded]
-    result.report_text = output["report_text"]
+    if len(result.summaries) > 1:
+        try:
+            synthesis = groq_client.synthesize_digest(
+                feed.topic_text or feed.name,
+                [{"title": s.paper["title"], "summary": f"TL;DR: {s.tldr}\n{s.body}"} for s in result.summaries],
+            )
+            result.themes, result.read_in_full, result.why = (
+                synthesis["themes"], synthesis["read_in_full"], synthesis["why"])
+        except Exception as exc:
+            # The per-paper summaries are the substance; the overview is a bonus.
+            _log(f"[{feed.name}] overview skipped: {type(exc).__name__}: {exc}")
+        if result.themes:
+            try:
+                result.themes, result.themes_note = check_themes(result.themes, result.summaries)
+            except Exception as exc:
+                result.themes_note = f"Themes could not be fact-checked ({type(exc).__name__})."
+            _log(f"[{feed.name}] {result.themes_note}")
+
     reports_dir.mkdir(parents=True, exist_ok=True)
     result.markdown_path = reports_dir / f"{day}-{feed.name}.md"
-    result.markdown_path.write_text(
-        _markdown(feed, day, result.papers, output, result.failed_downloads), encoding="utf-8")
-    if output.get("pdf_path"):
-        result.pdf_path = reports_dir / f"{day}-{feed.name}.pdf"
-        shutil.move(output["pdf_path"], result.pdf_path)
+    result.markdown_path.write_text(render_markdown(feed, day, result), encoding="utf-8")
+    result.pdf_path = reports_dir / f"{day}-{feed.name}.pdf"
+    render_pdf(feed, day, result, result.pdf_path)
     return result
+
+
+# --- rendering ---
+
+def _authors(paper: dict) -> str:
+    return ", ".join(paper["authors"][:4]) + (" et al." if len(paper["authors"]) > 4 else "")
+
+
+def _relevance_note(s: PaperSummary) -> str:
+    return f" · relevance {s.relevance:.2f}" if s.relevance is not None else ""
+
+
+def _overview_parts(feed: Feed, result: FeedResult) -> list[tuple[str, str]]:
+    """[(heading, markdown text)] shared by the Markdown and PDF reports."""
+    parts = []
+    if result.read_in_full:
+        s = result.summaries[result.read_in_full - 1]
+        parts.append(("Worth reading in full",
+                      f"**[P{result.read_in_full}] {s.paper['title']}** -- {result.why}"))
+    if result.themes:
+        parts.append(("Themes", result.themes + (f"\n\n*{result.themes_note}*" if result.themes_note else "")))
+    glance = "\n".join(
+        f"**[P{i}] {s.paper['title']}**{_relevance_note(s)}\n{s.tldr or '(no TL;DR)'}"
+        for i, s in enumerate(result.summaries, start=1)
+    )
+    parts.append(("At a glance", glance.replace("\n**", "\n\n**")))
+    if result.failed:
+        parts.append(("Not included", "\n".join(result.failed)))
+    return parts
+
+
+def render_markdown(feed: Feed, day: str, result: FeedResult) -> str:
+    topic = f" · topic: {feed.topic_text}" if feed.topic_text else ""
+    lines = [f"# {feed.name} -- {day}", "", f"{len(result.summaries)} new paper(s){topic}", ""]
+    for heading, text in _overview_parts(feed, result):
+        lines += [f"## {heading}", "", text, ""]
+    lines += ["Numbers like [P2] refer to the papers below; [n] inside a paper's summary "
+              "refers to that paper's own sources.", ""]
+    for i, s in enumerate(result.summaries, start=1):
+        p = s.paper
+        lines += ["---", "", f"## [P{i}] {p['title']}", "",
+                  f"{_authors(p)} · [arXiv {p['arxiv_id']}]({p['abs_url']}){_relevance_note(s)}", ""]
+        if s.tldr:
+            lines += [f"**TL;DR:** {s.tldr}", ""]
+        lines += [s.body, ""]
+        if s.citations:
+            lines += ["**Sources**", ""] + [f"- [{c['n']}] {c['label']}" for c in s.citations] + [""]
+    return "\n".join(lines)
+
+
+def render_pdf(feed: Feed, day: str, result: FeedResult, path: Path) -> None:
+    topic = f" · topic: {feed.topic_text}" if feed.topic_text else ""
+    pdf_export.build_digest_pdf(
+        str(path), title=f"{feed.name} -- {day}", subtitle=f"{len(result.summaries)} new paper(s){topic}",
+        overview=_overview_parts(feed, result),
+        papers=[{
+            "heading": f"[P{i}] {s.paper['title']}",
+            "meta": f"{_authors(s.paper)} · arXiv {s.paper['arxiv_id']} · {s.paper['abs_url']}{_relevance_note(s)}",
+            "text": (f"**TL;DR:** {s.tldr}\n\n" if s.tldr else "") + s.body,
+            "citations": s.citations,
+        } for i, s in enumerate(result.summaries, start=1)],
+    )
 
 
 # --- email ---
 
 def build_email(results: list[FeedResult], day: str, sender: str, recipient: str,
                 repo_url: str = "") -> EmailMessage:
-    covered = sum(len(r.papers) for r in results)
+    covered = sum(len(r.summaries) for r in results)
     msg = EmailMessage()
     msg["Subject"] = f"ResearchLens digest {day}: {covered} new paper{'s' * (covered != 1)}"
     msg["From"] = sender
@@ -180,12 +429,24 @@ def build_email(results: list[FeedResult], day: str, sender: str, recipient: str
     for r in results:
         if r.error:
             parts.append(f"=== {r.feed}: FAILED ===\n{r.error}")
-        elif not r.papers:
+            continue
+        if not r.summaries:
             parts.append(f"=== {r.feed}: nothing new ===")
-        else:
-            listing = "\n".join(f"- {p['title']}\n  {p['abs_url']}" for p in r.papers)
-            link = f"\nOnline: {repo_url}/blob/main/digests/reports/{r.markdown_path.name}" if repo_url else ""
-            parts.append(f"=== {r.feed}: {len(r.papers)} paper(s) ===\n{listing}{link}\n\n{r.report_text.strip()}")
+            continue
+        section = [f"=== {r.feed}: {len(r.summaries)} paper(s) ==="]
+        if r.read_in_full:
+            s = r.summaries[r.read_in_full - 1]
+            section.append(f"Worth reading in full: {s.paper['title']}\n{r.why}\n{s.paper['abs_url']}")
+        if r.themes:
+            section.append("Themes:\n" + r.themes)
+        section.append("At a glance:\n" + "\n\n".join(
+            f"[P{i}] {s.paper['title']}\n{s.tldr or '(no TL;DR)'}\n{s.paper['abs_url']}"
+            for i, s in enumerate(r.summaries, start=1)))
+        if r.failed:
+            section.append("Not included: " + "; ".join(r.failed))
+        online = f" -- online: {repo_url}/blob/main/digests/reports/{r.markdown_path.name}" if repo_url else ""
+        section.append(f"Full summaries with sources: the attached PDF{online}")
+        parts.append("\n\n".join(section))
     msg.set_content("\n\n\n".join(parts) + "\n")
 
     for r in results:
@@ -209,7 +470,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the daily arXiv digest.")
     parser.add_argument("--config", default="../digest.toml")
     parser.add_argument("--state-dir", default="../digests")
-    parser.add_argument("--dry-run", action="store_true", help="search only; change nothing")
+    parser.add_argument("--dry-run", action="store_true", help="search and rank only; change nothing")
     parser.add_argument("--no-email", action="store_true")
     args = parser.parse_args(argv)
 
@@ -223,17 +484,18 @@ def main(argv: list[str] | None = None) -> int:
     for feed in cfg.feeds:
         feed_seen = seen.setdefault(feed.name, {})
         try:
-            _, new = find_new_papers(feed, set(feed_seen))
+            chosen = choose_papers(feed, find_new_papers(feed, set(feed_seen)))
             if args.dry_run:
-                for p in new:
-                    _log(f"[{feed.name}]   would process {p['arxiv_id']}: {p['title']}")
+                for score, p in chosen:
+                    note = f" (relevance {score:.2f})" if score is not None else ""
+                    _log(f"[{feed.name}]   would process {p['arxiv_id']}{note}: {p['title']}")
                 continue
-            if not new:
+            if not chosen:
                 results.append(FeedResult(feed=feed.name))
                 continue
-            result = run_feed(feed, new, state_dir / "reports", day)
-            for p in result.papers:
-                feed_seen[p["id"]] = day
+            result = run_feed(feed, chosen, state_dir / "reports", day)
+            for s in result.summaries:
+                feed_seen[s.paper["id"]] = day
             # Saved after every feed, so a later feed crashing the process
             # can't lose the earlier ones' progress.
             save_seen(seen_path, seen)
@@ -247,7 +509,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     ok = not any(r.error for r in results)
-    anything = any(r.papers or r.error for r in results)
+    anything = any(r.summaries or r.error for r in results)
     if args.no_email or not os.getenv("SMTP_USER"):
         _log("Email skipped (--no-email, or SMTP_USER not set).")
     elif not anything and not cfg.email_when_nothing_new:

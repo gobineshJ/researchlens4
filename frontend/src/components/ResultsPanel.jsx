@@ -18,6 +18,10 @@ function SummaryRow({ label, value }) {
 // check, the PDF download and the evaluation table.
 export default function ResultsPanel({ result }) {
   const [downloadError, setDownloadError] = useState("");
+  // Numbered by the report's own [n] markers. Results from before the API
+  // returned `citations` only have the un-numbered labels.
+  const citations = result.citations
+    ?? (result.citations_used || []).map((label, i) => ({ n: i + 1, label }));
 
   async function handleDownload() {
     setDownloadError("");
@@ -44,12 +48,12 @@ export default function ResultsPanel({ result }) {
           <p style={styles.checkSubject}>Click a citation number to see the excerpt it refers to.</p>
           <ReportView text={result.report_text} sources={result.retrieved_chunks || []} />
 
-          {result.citations_used?.length > 0 && (
+          {citations.length > 0 && (
             <>
               <h4>Sources cited</h4>
               <ul>
-                {result.citations_used.map((label, i) => (
-                  <li key={i}>{label}</li>
+                {citations.map((c) => (
+                  <li key={c.n}>[{c.n}] {c.label}</li>
                 ))}
               </ul>
             </>

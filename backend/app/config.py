@@ -94,6 +94,14 @@ SUMMARY_MIN_EXCERPT_TOKENS = 250
 # GROQ_MAX_CONTEXT_TOKENS, but to no less than SUMMARY_MIN_EXCERPT_TOKENS
 # (~160 words; shorter excerpts stop carrying a coherent point). With the
 # default 5000-token budget that is up to 20 excerpts per request.
+SUMMARY_SECTION_AWARE = True
+# Evenly spaced positions miss what a reader of a paper summary wants most:
+# a page-9 excerpt is as likely to be a related-work paragraph as a result.
+# With this on, the positions are anchored first on the chunks where the
+# Results/Experiments, Limitations and Conclusion/Discussion sections start
+# (detected from their headings, e.g. "5 Results", "Limitations"), each
+# excerpt starting at the heading, and only the remaining slots are spread
+# evenly. Documents with no recognisable headings sample exactly as before.
 
 # --- Query expansion ---
 # A short generic instruction ("focus on research gaps") embeds poorly
@@ -299,3 +307,24 @@ ARXIV_DEFAULT_INSTRUCTIONS = (
     "Summarize each paper: the problem it addresses, its method, its key "
     "results, and its stated limitations. Then note any themes the papers share."
 )
+
+# --- Daily digest (app/daily_digest.py) ---
+DIGEST_PAPER_INSTRUCTIONS = (
+    "Summarize this one paper for a researcher deciding whether to read it in full. "
+    "Begin with a single line of the form 'TL;DR: <one sentence>'. Then write four "
+    "short labelled parts -- Problem, Method, Key results, Limitations -- each a few "
+    "sentences. Under Key results, give the concrete numbers (scores, gains, "
+    "datasets, baselines) the excerpts state. If the excerpts don't state "
+    "something, say so in one short sentence instead of guessing."
+)
+# Used once PER PAPER: each paper gets its own pipeline run and the whole
+# GROQ_MAX_CONTEXT_TOKENS budget, instead of five papers sharing one budget
+# (about one excerpt each). A feed's `instructions` in digest.toml replaces it.
+DIGEST_MIN_RELEVANCE = 0.20
+# Papers are ranked by cosine similarity between the feed's topic and each
+# paper's title + abstract (the local embedding model -- no API calls), and
+# the top max_papers are kept. Measured on a week of real cs.CL/IR/AI
+# "retrieval augmented generation" results (2026-10): core RAG papers
+# 0.45-0.55, a RAG prompt-injection paper 0.24, an unrelated survey dataset
+# 0.14. So this floor only drops clear misses; ranking does the rest.
+# Per feed: min_relevance. A one-sentence `topic` ranks better than keywords.
