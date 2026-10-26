@@ -198,6 +198,17 @@ ENTAILMENT_MAX_SOURCE_TOKENS = 3000
 # requests as fit; a claim whose cited excerpts alone exceed this gets them
 # truncated.
 ENTAILMENT_MAX_COMPLETION_TOKENS = 3000
+
+# --- Mind map ---
+MIND_MAP_ENABLED = os.getenv("MIND_MAP_ENABLED", "true").lower() in ("1", "true", "yes")
+# After the report is final, its cited sentences are laid out as a graph:
+# the question -> themes -> claims -> the documents each claim cites. One
+# small Groq call groups the claims into themes; if it fails, claims are
+# grouped by the document they cite instead, so the map is never missing.
+MIND_MAP_MAX_CLAIMS = 40
+# Longer reports are sampled evenly -- past this a map stops being readable.
+MIND_MAP_MAX_THEMES = 6
+MIND_MAP_MAX_COMPLETION_TOKENS = 2000
 # Room for the judge's reasoning AND its JSON answer. Groq counts this
 # against the per-minute limit up front (8000 TPM for gpt-oss-20b on the
 # free tier), so excerpts + claims + this must stay well under 8000.

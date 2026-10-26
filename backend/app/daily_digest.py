@@ -231,6 +231,7 @@ def summarize_paper(feed: Feed, paper: dict, relevance: float | None, pdf_path: 
     output = run_pipeline(
         [pdf_path], [], feed.instructions, run_id=f"digest-{feed.name}-{day}-{paper['id']}",
         extra_records=[abstract_record(paper, Path(pdf_path).name)], intent="summary", export_pdf=False,
+        mind_map=False,
     )
     if not output.get("report_text"):
         raise RuntimeError("the pipeline produced no summary")

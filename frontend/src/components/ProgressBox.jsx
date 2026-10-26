@@ -13,6 +13,7 @@ const STAGE_LABELS = {
   self_correction_retry: "Report was weakly grounded — retrying with new searches",
   entailment: "Checking each cited claim against its source",
   claim_revision: "Rewriting the sentences the claim check flagged",
+  mind_map: "Building the mind map",
   pdf_export: "Exporting the PDF",
 };
 

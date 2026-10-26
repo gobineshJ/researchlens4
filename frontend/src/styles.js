@@ -56,6 +56,9 @@ export const styles = {
     textDecoration: "underline dotted",
   },
   citationActive: { background: "#dbe8fb", borderRadius: 3 },
+  tabs: { display: "flex", border: "1px solid #ccc", borderRadius: 6, overflow: "hidden" },
+  tab: { padding: "0.35rem 0.9rem", fontSize: "0.88rem", border: "none", background: "#fff", cursor: "pointer" },
+  tabActive: { background: "#1a1a1a", color: "#fff" },
   excerptBox: {
     marginTop: "0.8rem",
     padding: "0.8rem",

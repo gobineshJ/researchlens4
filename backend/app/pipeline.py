@@ -10,13 +10,13 @@ import uuid
 from collections import Counter
 from pathlib import Path
 
-from . import doc_parser, scraper, groq_client, chunker, vectorstore, pdf_export, evaluation, reranker, hybrid_search
+from . import doc_parser, scraper, groq_client, chunker, vectorstore, pdf_export, evaluation, reranker, hybrid_search, mindmap
 from .config import (
     TOP_K_CHUNKS, TOP_K_CHUNKS_PER_SOURCE, CANDIDATE_OVERSAMPLE_FACTOR,
     ANALYSIS_TOP_K_MULTIPLIER, RRF_K, GROUNDEDNESS_THRESHOLD, MAX_RETRIEVAL_ATTEMPTS,
     GROQ_MAX_CONTEXT_TOKENS, SUMMARY_MAX_EXCERPTS_PER_SOURCE, SUMMARY_MIN_EXCERPT_TOKENS,
     MULTI_HOP_ENABLED, MULTI_HOP_MAX_EXTRA_HOPS, ENTAILMENT_CHECK_ENABLED, ENTAILMENT_MAX_CLAIMS,
-    CLAIM_REVISION_ENABLED,
+    CLAIM_REVISION_ENABLED, MIND_MAP_ENABLED,
 )
 
 
@@ -202,7 +202,7 @@ def _hop_detail(hops: list[dict]) -> str:
 def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str,
                  username: str | None = None, run_id: str | None = None, *,
                  extra_records: list[dict] | None = None, intent: str | None = None,
-                 export_pdf: bool = True) -> dict:
+                 export_pdf: bool = True, mind_map: bool = True) -> dict:
     """Runs every stage (see _run_pipeline) and always drops the run's
     vector collection afterwards, even if a stage failed.
 
@@ -212,11 +212,12 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str,
                      then becomes the first chunk of that paper
       intent         skip intent classification and use this one
       export_pdf     False when the caller lays out its own PDF
+      mind_map       False to skip the mind map (and its Groq call)
     """
     collections: list = []
     try:
         return _run_pipeline(file_paths, seed_urls, instructions, username, run_id, collections,
-                             extra_records or [], intent, export_pdf)
+                             extra_records or [], intent, export_pdf, mind_map)
     finally:
         for collection in collections:
             vectorstore.drop_session_collection(collection)
@@ -224,7 +225,8 @@ def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str,
 
 def _run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str,
                   username: str | None, run_id: str | None, collections: list,
-                  extra_records: list[dict], forced_intent: str | None, export_pdf: bool) -> dict:
+                  extra_records: list[dict], forced_intent: str | None, export_pdf: bool,
+                  mind_map: bool) -> dict:
     report = evaluation.EvaluationReport()
     all_records: list[dict] = list(extra_records)
 
@@ -531,7 +533,20 @@ def _run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str
         generation_result["report_text"], generation_result["citations_used"], retrieved, report
     )
 
-    # --- Stage 9: PDF export ---
+    # --- Stage 9: mind map ---
+    # From the FINAL report, so its claims match what the user reads. A map
+    # that can't be built is recorded, never a reason to fail the run.
+    mind_map_graph = None
+    if mind_map and MIND_MAP_ENABLED and generation_result["report_text"]:
+        try:
+            with report.timed_stage("mind_map"):
+                mind_map_graph = mindmap.build_mind_map(
+                    generation_result["report_text"], retrieved, instructions, claim_verdicts, report
+                )
+        except Exception:
+            pass  # timed_stage already recorded it
+
+    # --- Stage 10: PDF export ---
     # Numbered by the report's own [n] markers -- see groq_client.numbered_citations.
     citations = groq_client.numbered_citations(generation_result["report_text"], retrieved)
     pdf_path = None
@@ -561,6 +576,8 @@ def _run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str
         # list needs (citations_used has no numbers).
         "citations": citations,
         "claim_verdicts": claim_verdicts,
+        # {"themes_from", "nodes", "edges"} -- see mindmap.build_mind_map.
+        "mind_map": mind_map_graph,
         "pdf_path": pdf_path,
         # Just the filename, OS-agnostic -- the frontend uses this directly
         # for the download link instead of trying to parse pdf_path itself,

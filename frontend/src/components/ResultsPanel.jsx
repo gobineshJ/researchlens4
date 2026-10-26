@@ -3,6 +3,7 @@ import { downloadFile } from "../api.js";
 import { styles } from "../styles.js";
 import ClaimVerdicts from "./ClaimVerdicts.jsx";
 import EvaluationPanel from "./EvaluationPanel.jsx";
+import MindMap from "./MindMap.jsx";
 import ReportView from "./ReportView.jsx";
 
 function SummaryRow({ label, value }) {
@@ -18,6 +19,7 @@ function SummaryRow({ label, value }) {
 // check, the PDF download and the evaluation table.
 export default function ResultsPanel({ result }) {
   const [downloadError, setDownloadError] = useState("");
+  const [view, setView] = useState("report");
   // Numbered by the report's own [n] markers. Results from before the API
   // returned `citations` only have the un-numbered labels.
   const citations = result.citations
@@ -44,9 +46,28 @@ export default function ResultsPanel({ result }) {
 
       {result.report_text && (
         <div style={styles.reportBox}>
-          <h3>Generated report</h3>
-          <p style={styles.checkSubject}>Click a citation number to see the excerpt it refers to.</p>
-          <ReportView text={result.report_text} sources={result.retrieved_chunks || []} />
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem" }}>
+            <h3>Generated report</h3>
+            {/* Runs from before mind maps existed have none. */}
+            {result.mind_map && (
+              <div style={styles.tabs}>
+                {[["report", "Report"], ["map", "Mind map"]].map(([key, label]) => (
+                  <button key={key} type="button" onClick={() => setView(key)}
+                          style={{ ...styles.tab, ...(view === key ? styles.tabActive : {}) }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          {view === "map" && result.mind_map ? (
+            <MindMap graph={result.mind_map} sources={result.retrieved_chunks || []} />
+          ) : (
+            <>
+              <p style={styles.checkSubject}>Click a citation number to see the excerpt it refers to.</p>
+              <ReportView text={result.report_text} sources={result.retrieved_chunks || []} />
+            </>
+          )}
 
           {citations.length > 0 && (
             <>

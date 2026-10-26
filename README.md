@@ -114,10 +114,16 @@ USER ──► LOGIN SCREEN ──► POST /auth/token (OAuth2 password flow) �
                               TARGETED REVISION: only the flagged sentences are rewritten against
                               their own excerpts (or removed), spliced back in, and judged again
                                                                             │
+                              MIND MAP: the final report's cited sentences, grouped into themes by
+                              Groq (openai/gpt-oss-20b) -- question -> themes -> claims -> the
+                              documents each claim cites, with every claim's verdict. If grouping
+                              fails, claims are grouped by the document they cite instead
+                                                                            │
                                                       Grounded report + citations ──► REPORTLAB ──► PDF
                                                                             │
                                                      REACT UI ──► report with clickable [n] citations (each opens
-                                                                  the exact excerpt); Download (fetched with the bearer
+                                                                  the exact excerpt); a "Mind map" tab drawing the
+                                                                  graph (React Flow); Download (fetched with the bearer
                                                                   token; only the user who ran the job can download it)
                                                                             │
                                                      Every run's evaluation ──► evaluation_log.jsonl
@@ -175,6 +181,7 @@ researchlens/
 │   │   ├── hybrid_search.py   # BM25 keyword search + Reciprocal Rank Fusion (RRF) with vector search
 │   │   ├── reranker.py        # cross-encoder reranking, multi-query, boilerplate-stripped snippets, graceful fallback
 │   │   ├── pdf_export.py      # ReportLab PDF generation + Unicode sanitization
+│   │   ├── mindmap.py         # the final report as a graph: question -> themes -> claims -> source documents
 │   │   ├── evaluation.py      # validation checks per stage + persistent run logging
 │   │   └── pipeline.py        # orchestrates all stages, including iterative multi-hop retrieval and the self-correction retry loop
 │   ├── eval/                  # measuring quality on a golden set (see "Measuring quality" below)
@@ -527,6 +534,7 @@ This started as a one-day build and has since grown well past the original three
 * Precision@K/Recall@K/MRR run against a real, labeled retrieval (`tests/integration/test_retrieval_metrics.py`) — **Done**, closing a gap that was previously just an untested formula
 
 * Background pipeline runs on a Celery worker (Redis broker), with job polling and live progress in the UI — **Done**, verified with a real worker on Windows
+* Mind map of each report: cited claims grouped into themes, linked to the documents they cite and colored by the claim check's verdict; click any node to read it in full and highlight what it connects to (`MIND_MAP_ENABLED`, on by default; the daily digest skips it) — **Done**, unit-tested
 * Login screen + OAuth2 password flow with JWT bearer tokens protecting every endpoint; per-user job and report access — **Done**, unit-tested and verified in the browser
 * PDF figures rendered and described by Groq's vision model, cached per image — **Done**
 * Groq rate limits handled: requests paced against the model's per-minute budget (including the vision model's input-token limit, learned from Groq's 429 message), remaining 429s waited out and retried — **Done**, verified against the live API (8 of 8 figures described, 1 rejected request instead of 6)
