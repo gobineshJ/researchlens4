@@ -337,7 +337,7 @@ curl -X POST http://127.0.0.1:8000/papers/arxiv/process -H "$KEY" -H "Content-Ty
 #    result.arxiv = {"included": [...], "failed": ["<id>: <reason>", ...]}
 ```
 
-Search fields: `keywords` (phrases, OR'd together), `categories` (OR'd together), `days` (default 3, `null` = any time), `max_results` (default 25, up to 100), `only_new` (default `true`), `feed`. At least one keyword or category is required. arXiv announces new papers about a day after they're submitted, so use `days` of 2–3 for a daily digest. Seen-tracking means the overlap doesn't repeat any papers.
+Search fields: `keywords` (phrases, OR'd together), `categories` (OR'd together), `days` (default 3, `null` = any time), `max_results` (default 25, up to 100), `only_new` (default `true`), `feed`. At least one keyword or category is required. arXiv announces new papers 1–4 days after they're submitted (Thursday-afternoon to Friday submissions only appear on Sunday night), and `days` filters by *submission* date, so use `days` of 5–7 for a daily digest. With 3, Monday's run finds that weekend batch already outside its window. Seen-tracking means the overlap doesn't repeat any papers.
 
 All arXiv traffic goes to `export.arxiv.org` (the host arXiv asks automated clients to use), at most one request every 3 seconds per process, as arXiv's API terms require. Note that a run takes roughly 3 seconds per paper longer than an upload-based one.
 
