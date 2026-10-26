@@ -11,9 +11,12 @@
 #   topic          one sentence on what you care about. Papers are ranked by
 #                  how close their abstract is to it (keywords if no topic),
 #                  and the best max_papers are summarised.
-#   days           only papers submitted in the last N days. arXiv announces
-#                  papers about a day after submission, so keep this >= 2;
-#                  seen.json stops the overlap from repeating anything.
+#   days           only papers SUBMITTED in the last N days. A paper only shows
+#                  up once arXiv announces it, which is 1-4 days after
+#                  submission (Thursday-afternoon to Friday submissions are
+#                  announced Sunday night), so keep this >= 5 -- with 3, Monday's
+#                  run never sees that batch. seen.json stops the overlap from
+#                  repeating anything.
 #   max_papers     papers per report (1-8). Each one is summarised on its own,
 #                  so more papers = a longer run, not shallower summaries.
 #   max_results    how many of the newest matches to rank (1-100)
@@ -26,7 +29,7 @@
 email_when_nothing_new = false
 
 [defaults]
-days = 3
+days = 7
 max_papers = 5
 max_results = 50
 
