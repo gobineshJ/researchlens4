@@ -13,8 +13,22 @@ WORKDIR /app
 # libraries that a CPU container never uses.
 RUN pip install --index-url https://download.pytorch.org/whl/cpu torch
 
+# Slow or flaky connections: wait up to 2 minutes on a stalled download
+# (pip's default is 15 s, Hugging Face's 10 s) and retry, instead of
+# failing the build. Set here, below the torch layer, so changing them
+# never invalidates that ~200 MB download.
+ENV PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=10 \
+    HF_HUB_DOWNLOAD_TIMEOUT=120 \
+    HF_HUB_ETAG_TIMEOUT=60
+
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+# The cache mount keeps every wheel that finished downloading across
+# builds, so a build that fails halfway resumes rather than starting the
+# list over. It lives outside the image (PIP_NO_CACHE_DIR still keeps
+# the image itself free of a pip cache).
+RUN --mount=type=cache,target=/root/.cache/pip \
+    env -u PIP_NO_CACHE_DIR pip install -r requirements.txt
 
 # Bake the embedding and reranker models into the image, so the first
 # report doesn't stall on a download (and the worker can run offline).
