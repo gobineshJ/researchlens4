@@ -161,10 +161,10 @@ def fakes(monkeypatch, tmp_path):
         return paths, list(ids), []
 
     def fake_pipeline(file_paths, seed_urls, instructions, username=None, run_id=None, *,
-                      extra_records=None, intent=None, export_pdf=True):
+                      extra_records=None, intent=None, export_pdf=True, mind_map=True):
         [pdf] = file_paths
         state["pipeline_calls"].append({"file": Path(pdf).name, "instructions": instructions, "run_id": run_id,
-                                        "intent": intent, "export_pdf": export_pdf,
+                                        "intent": intent, "export_pdf": export_pdf, "mind_map": mind_map,
                                         "extra": [r["location"] for r in extra_records or []]})
         if any(i in pdf for i in state["fail_summary_for"]):
             raise RuntimeError("Groq is down")
@@ -213,7 +213,8 @@ def test_full_run_summarises_each_paper_then_synthesises(tmp_path, fakes):
     calls = fakes["pipeline_calls"]
     assert [c["file"] for c in calls] == ["arXiv 2610.00001v2.pdf", "arXiv 2610.00002v1.pdf",
                                           "arXiv 2610.00009v1.pdf"]
-    assert all(c["intent"] == "summary" and c["export_pdf"] is False and c["extra"] == ["arXiv abstract"]
+    assert all(c["intent"] == "summary" and c["export_pdf"] is False and c["mind_map"] is False
+               and c["extra"] == ["arXiv abstract"]
                for c in calls)
     assert calls[0]["instructions"] == daily_digest.config.DIGEST_PAPER_INSTRUCTIONS
     assert calls[2]["instructions"] == "Compare them."

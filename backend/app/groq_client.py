@@ -38,7 +38,7 @@ from .config import (
     GROQ_API_KEY, GROQ_FILTER_MODEL, GROQ_GENERATION_MODEL, GROQ_MAX_CONTEXT_TOKENS,
     GROQ_VISION_MODEL, QUERY_EXPANSION_VARIANTS, GROQ_RATE_LIMIT_REDIS_URL,
     GROQ_JUDGE_MODEL, ENTAILMENT_MAX_SOURCE_TOKENS, ENTAILMENT_MAX_COMPLETION_TOKENS,
-    MULTI_HOP_EVIDENCE_TOKENS,
+    MULTI_HOP_EVIDENCE_TOKENS, MIND_MAP_MAX_THEMES, MIND_MAP_MAX_COMPLETION_TOKENS,
 )
 
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
@@ -1267,3 +1267,52 @@ def revise_claims(flagged: list[dict], chunks: list[dict],
         elif action == "rewrite" and isinstance(entry.get("text"), str) and entry["text"].strip():
             results[n] = {"action": "rewrite", "text": entry["text"].strip()}
     return results
+
+
+def group_claims(instructions: str, claims: list[str],
+                 max_themes: int = MIND_MAP_MAX_THEMES) -> list[dict]:
+    """
+    Groups a report's cited sentences into themes, for the mind map:
+    [{"label": "short name", "summary": "one sentence", "claims": [0-based
+    indices into `claims`]}, ...]. Each claim lands in at most one theme
+    (its first); claims the model left out are simply missing -- the
+    caller decides where they go. Themes with no valid claims are dropped.
+    Raises on request failures or a response with no usable theme.
+    """
+    listing = "\n".join(f"{i + 1}. {text}" for i, text in enumerate(claims))
+    system_prompt = (
+        "You organise the sentences of a research report into a mind map. Group the "
+        f"numbered sentences into 2-{max_themes} themes -- the main ideas a reader "
+        "should come away with (e.g. a method, a result, a limitation, a dataset), not "
+        "generic buckets like 'Other' or 'Findings'. Every sentence goes in exactly "
+        "one theme. Theme labels are 2-5 words; the summary is one sentence saying "
+        "what the theme's sentences establish together, using only what they say.\n"
+        'Respond ONLY with JSON: {"themes": [{"label": "...", "summary": "...", '
+        '"sentences": [1, 4]}, ...]}'
+    )
+    user_prompt = f"The report answers: {instructions or 'a summary of the sources'}\n\nSentences:\n{listing}"
+    parsed = json.loads(_call_groq(
+        GROQ_FILTER_MODEL, system_prompt, user_prompt, json_mode=True, temperature=0,
+        reasoning_effort="low", max_completion_tokens=MIND_MAP_MAX_COMPLETION_TOKENS,
+    ))
+    themes: list[dict] = []
+    placed: set[int] = set()
+    for entry in parsed.get("themes", []) if isinstance(parsed, dict) else []:
+        if not isinstance(entry, dict) or len(themes) >= max_themes:
+            continue
+        label = " ".join(str(entry.get("label", "")).split())
+        members = []
+        for n in entry.get("sentences", []) if isinstance(entry.get("sentences"), list) else []:
+            try:
+                i = int(n) - 1
+            except (TypeError, ValueError):
+                continue
+            if 0 <= i < len(claims) and i not in placed:
+                placed.add(i)
+                members.append(i)
+        if label and members:
+            themes.append({"label": label, "summary": " ".join(str(entry.get("summary", "")).split()),
+                           "claims": members})
+    if not themes:
+        raise ValueError("The theme grouping came back with no usable themes.")
+    return themes
