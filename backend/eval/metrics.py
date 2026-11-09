@@ -11,6 +11,9 @@ from pathlib import Path
 
 DATA_DIR = Path(__file__).parent / "data"
 GOLDEN_DIR = DATA_DIR / "golden"
+HARD_DIR = DATA_DIR / "golden_hard"
+# The hard set: long documents, look-alike distractors, bridge facts the
+# question never names. See eval/data/golden_hard/make_registry.py.
 
 
 def load_jsonl(path: str | Path) -> list[dict]:
@@ -85,7 +88,7 @@ def mean(values) -> float | None:
 
 
 METRICS = ["evidence_recall", "evidence_mrr", "fact_recall", "answer_score",
-           "entailment", "groundedness", "hops", "groq_calls", "seconds"]
+           "entailment", "groundedness", "hops", "agent_steps", "groq_calls", "groq_tokens", "seconds"]
 
 
 def aggregate(rows: list[dict]) -> dict:

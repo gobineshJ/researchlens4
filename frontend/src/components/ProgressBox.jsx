@@ -1,4 +1,5 @@
 import { styles } from "../styles.js";
+import AgentTrace from "./AgentTrace.jsx";
 
 // Pipeline stage names (as the backend reports them) -> what the user sees.
 const STAGE_LABELS = {
@@ -14,6 +15,8 @@ const STAGE_LABELS = {
   entailment: "Checking each cited claim against its source",
   claim_revision: "Rewriting the sentences the claim check flagged",
   mind_map: "Building the mind map",
+  knowledge_graph: "Building the knowledge graph",
+  agent_retrieval: "Agent is choosing which tools to search with",
   pdf_export: "Exporting the PDF",
 };
 
@@ -32,6 +35,7 @@ export default function ProgressBox({ jobStatus, progress }) {
       ) : (
         <strong>Running the pipeline…</strong>
       )}
+      <AgentTrace trace={progress?.trace} live />
       {progress?.draft && (
         <>
           <div style={styles.progressDetail}>

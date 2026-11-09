@@ -1,0 +1,39 @@
+Oskarsund Battery Test Centre: Customer Handbook
+
+Edition 6, 2025. Centre director: Dr. Amara Lindqvist.
+
+1 Who we are
+
+The Oskarsund Battery Test Centre is an independent laboratory that tests battery cells and modules for universities, start-ups and manufacturers. We do not develop or sell batteries ourselves, which lets customers use our results as an independent check on their own measurements. The centre is accredited to the EN 6240 standard for battery testing laboratories, and our accreditation is renewed by external audit every two years.
+
+The centre has 512 test channels for cells up to 20 ampere-hours and 24 channels for modules up to 2 kilowatt-hours. Climate chambers allow testing between minus 40 and plus 80 degrees Celsius.
+
+2 Standard protocols
+
+Customers can choose one of our standard protocols or agree a custom protocol in writing before testing begins. Standard protocols are preferred, because their results can be compared directly across customers and over time.
+
+Cycle-life protocol. Cells are cycled between the voltage limits given by the customer at a constant rate, usually 1C, in climate chambers held at 25 degrees Celsius. Capacity is checked every 100 cycles with a reference cycle at a slower rate. A cell reaches end of life when its capacity falls below 80 percent of its initial value, unless the customer specifies a different threshold.
+
+Accelerated ageing protocol. To estimate long-term ageing in a shorter time, cells are cycled or stored at 45 degrees Celsius. Results from accelerated ageing are reported separately and are not mixed with standard cycle-life results.
+
+Abuse protocols. Nail penetration, overcharge and short-circuit tests are carried out in a separate blast-proof bay. Abuse tests are only available for cells that have first completed at least one formation cycle at the centre.
+
+3 Receiving cells
+
+Cells must arrive with a safety data sheet and a description of their chemistry. Cells are stored in a fire-resistant cabinet until testing starts and are inspected for swelling or leakage on arrival. Damaged cells are not tested and are returned or disposed of at the customer's cost.
+
+4 Data and reporting
+
+Every channel records voltage, current and temperature once per second. Customers receive a weekly summary and a final report signed by the responsible test engineer. Raw data are kept for 10 years after the end of a test campaign and are released only to the customer, unless the customer agrees in writing to publication.
+
+5 Fees
+
+Fees are charged per channel per week. In 2025 the fee is 85 euros per cell channel per week and 640 euros per module channel per week. Abuse tests are charged per test. Academic customers receive a 30 percent discount on channel fees.
+
+6 Safety
+
+All staff complete battery safety training every year. The test halls have gas detection and an automatic suppression system. In 2024 there was one thermal event, in which a customer cell vented during an overcharge test in the blast-proof bay; it was contained without damage to other equipment.
+
+7 Contact
+
+Requests for testing are reviewed weekly by the centre director, Dr. Amara Lindqvist, together with the head of operations, Mr. Henrik Saeterdal.

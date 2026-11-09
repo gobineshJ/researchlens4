@@ -175,9 +175,39 @@ MULTI_HOP_EVIDENCE_TOKENS = 3000
 # How much of the evidence-so-far the hop planner gets to read, split
 # evenly across the retrieved chunks.
 
+# --- Agentic retrieval ---
+AGENT_MODE = os.getenv("AGENT_MODE", "off").lower()
+# "on": for questions (targeted_qa / analysis), an LLM agent chooses which
+# retrieval tool to call, step by step, instead of the fixed decompose ->
+# expand -> hybrid search -> multi-hop chain (see agent.py). Summaries keep
+# positional sampling either way. Writing, the claim check and revision
+# always run on whatever the agent gathered. "off": the fixed pipeline.
+AGENT_GRAPH_TOOLS = os.getenv("AGENT_GRAPH_TOOLS", "true").lower() in ("1", "true", "yes")
+# Give the agent the knowledge-graph tools (graph_lookup, graph_path).
+AGENT_MODEL = os.getenv("AGENT_MODEL", "qwen/qwen3.8-27b")
+# Chosen by experiment (README "Experiments"): on the hard set's chain
+# questions, gpt-oss-20b circled and never finished, gpt-oss-120b got there
+# in 7-8 steps partly by luck, and Qwen read several passages per step and
+# picked exactly the right evidence. It also has its own daily quota,
+# separate from the report writer's.
+AGENT_REASONING_EFFORT = os.getenv("AGENT_REASONING_EFFORT", "low")
+AGENT_MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "8"))
+AGENT_MAX_TOKENS = int(os.getenv("AGENT_MAX_TOKENS", "30000"))
+AGENT_MAX_SECONDS = int(os.getenv("AGENT_MAX_SECONDS", "240"))
+# Hard limits per question: model calls, total tokens, wall time. Whatever
+# was gathered when a limit hits is used as the evidence.
+AGENT_SEARCH_RESULTS = 4
+AGENT_MAX_OBSERVATION_CHARS = 3000
+
 # --- Entailment (claim-level faithfulness) ---
 ENTAILMENT_CHECK_ENABLED = os.getenv("ENTAILMENT_CHECK_ENABLED", "true").lower() in ("1", "true", "yes")
-GROQ_JUDGE_MODEL = GROQ_FILTER_MODEL
+GROQ_JUDGE_MODEL = os.getenv("GROQ_JUDGE_MODEL", "qwen/qwen3.8-27b")
+# The entailment judge (and the eval harness's answer grader) run on their
+# own model, so they draw on a separate daily token quota: on Groq's free
+# tier every model has its own allowance, and gpt-oss-20b's 200K tokens/day
+# are already shared by the router, query rewriting and hop planning.
+# Measured on eval/data/judge_labels.jsonl before switching -- see the
+# README's "Experiments". Set GROQ_JUDGE_MODEL=openai/gpt-oss-20b to go back.
 ENTAILMENT_THRESHOLD = 0.7
 # Groundedness above is vocabulary overlap: a report can reuse a source's
 # words while misstating what it says and still pass. The entailment check
@@ -192,6 +222,10 @@ CLAIM_REVISION_ENABLED = os.getenv("CLAIM_REVISION_ENABLED", "true").lower() in 
 # and the rest of the report is left exactly as written. The flagged
 # originals stay visible in the UI's Claim check.
 ENTAILMENT_MAX_CLAIMS = 25
+ENTAILMENT_MAX_CLAIMS_PER_BATCH = 8
+# Claims judged per request. Some judge models stop partway through a long
+# list (Qwen returned 10 verdicts for 40 claims), so lists are kept short,
+# and any claim a reply skips is asked about once more on its own.
 # Longer reports are sampled evenly, so the check's cost stays bounded.
 ENTAILMENT_MAX_SOURCE_TOKENS = 3000
 # Cited excerpts sent per judging request. Claims are packed into as few

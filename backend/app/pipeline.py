@@ -11,12 +11,13 @@ from collections import Counter
 from pathlib import Path
 
 from . import doc_parser, scraper, groq_client, chunker, vectorstore, pdf_export, evaluation, reranker, hybrid_search, mindmap
+from . import agent, knowledge_graph
 from .config import (
     TOP_K_CHUNKS, TOP_K_CHUNKS_PER_SOURCE, CANDIDATE_OVERSAMPLE_FACTOR,
     ANALYSIS_TOP_K_MULTIPLIER, RRF_K, GROUNDEDNESS_THRESHOLD, MAX_RETRIEVAL_ATTEMPTS,
     GROQ_MAX_CONTEXT_TOKENS, SUMMARY_MAX_EXCERPTS_PER_SOURCE, SUMMARY_MIN_EXCERPT_TOKENS,
     MULTI_HOP_ENABLED, MULTI_HOP_MAX_EXTRA_HOPS, ENTAILMENT_CHECK_ENABLED, ENTAILMENT_MAX_CLAIMS,
-    CLAIM_REVISION_ENABLED, MIND_MAP_ENABLED,
+    CLAIM_REVISION_ENABLED, AGENT_MODE, AGENT_GRAPH_TOOLS, MIND_MAP_ENABLED,
 )
 
 
@@ -199,6 +200,53 @@ def _hop_detail(hops: list[dict]) -> str:
             f"retrieved. {steps}.")
 
 
+def _agentic_retrieve(instructions: str, chunks: list[dict], records: list[dict], collection,
+                      report) -> tuple["agent.AgentResult | None", list[dict]]:
+    """
+    Agentic retrieval (AGENT_MODE=on): builds the knowledge graph if the
+    graph tools are enabled, then lets the agent choose its tools. Returns
+    (None, []) when the agent can't run or finds nothing, so the caller
+    falls back to the fixed pipeline -- recorded, never silent.
+    """
+    graph = None
+    if AGENT_GRAPH_TOOLS:
+        with report.timed_stage("knowledge_graph"):
+            names = sorted({c["source_name"] for c in chunks})
+            passages = [{"cid": f"{names.index(c['source_name']) + 1}.{c.get('position', 0)}",
+                         "source_name": c["source_name"], "text": c["text"]} for c in chunks]
+            documents = {}
+            for r in records:
+                documents.setdefault(chunker._source_name_for(r), []).append(r.get("text", ""))
+            graph = knowledge_graph.KnowledgeGraph.build(
+                passages, [{"source_name": k, "text": "\n".join(v)} for k, v in documents.items()])
+            stats = graph.stats()
+            report.add_check("retrieval", "knowledge_graph", True,
+                             f"{stats['entities']} entities and {stats['edges']} relations "
+                             f"({stats['sentence_edges']} from shared sentences) built from "
+                             f"{len(passages)} passages, without any LLM call.",
+                             value=stats["entities"])
+    try:
+        with report.timed_stage("agent_retrieval"):
+            result = agent.run_agent(instructions, chunks, collection, graph)
+    except Exception as exc:
+        report.record_error("agent_retrieval", f"Agent could not run ({exc}); used the fixed pipeline instead.")
+        return None, []
+    tools_used = {}
+    for step in result.trace:
+        tools_used[step["tool"]] = tools_used.get(step["tool"], 0) + 1
+    usage = ", ".join(f"{name} x{n}" for name, n in tools_used.items()) or "no tools"
+    report.add_check(
+        "retrieval", "agent", bool(result.passages),
+        f"{result.steps} step(s), {result.tokens:,} tokens; tools: {usage}; stopped: {result.stop_reason}; "
+        f"{len(result.passages)} passage(s) gathered"
+        + ("" if result.passages else " -- nothing usable, so the fixed pipeline was used instead") + ".",
+        value=result.steps,
+    )
+    if not result.passages:
+        return None, []
+    return result, result.passages
+
+
 def run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str,
                  username: str | None = None, run_id: str | None = None, *,
                  extra_records: list[dict] | None = None, intent: str | None = None,
@@ -336,6 +384,7 @@ def _run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str
 
         sub_questions: list[str] = [instructions]
         retrieved: list[dict] = []
+        agent_result = None
 
         if intent == "summary":
             # No query expansion and no cross-encoder on this path. Both only
@@ -420,7 +469,10 @@ def _run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str
                 value=len(sampled),
             )
             retrieved.extend(sampled)
-        else:
+        elif AGENT_MODE == "on":
+            agent_result, retrieved = _agentic_retrieve(
+                instructions, chunks, all_records, collection, report)
+        if intent != "summary" and agent_result is None:
             sub_questions = groq_client.decompose_query(instructions)
             is_decomposed = len(sub_questions) > 1
             report.add_check(
@@ -459,7 +511,7 @@ def _run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str
     # Only for "targeted_qa"/"analysis" -- "summary"'s positional sampling
     # doesn't depend on the search query, so reformulating it wouldn't
     # change which chunks get picked.
-    if intent != "summary" and MAX_RETRIEVAL_ATTEMPTS > 1 and retrieved:
+    if intent != "summary" and agent_result is None and MAX_RETRIEVAL_ATTEMPTS > 1 and retrieved:
         original_groundedness = evaluation.compute_groundedness(
             generation_result["report_text"], generation_result["citations_used"], retrieved
         )
@@ -578,6 +630,8 @@ def _run_pipeline(file_paths: list[str], seed_urls: list[str], instructions: str
         "claim_verdicts": claim_verdicts,
         # {"themes_from", "nodes", "edges"} -- see mindmap.build_mind_map.
         "mind_map": mind_map_graph,
+        # The retrieval agent's tool calls, when AGENT_MODE is on.
+        "agent_trace": agent_result.trace if agent_result else None,
         "pdf_path": pdf_path,
         # Just the filename, OS-agnostic -- the frontend uses this directly
         # for the download link instead of trying to parse pdf_path itself,

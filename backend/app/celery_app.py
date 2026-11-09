@@ -72,7 +72,7 @@ def run_pipeline_task(self, job_dir: str, file_paths: list[str], seed_urls: list
     # A custom "PROGRESS" state whose meta /jobs/{id} hands to the frontend
     # while the run is still going: the current stage, a detail line, and
     # the report so far once generation is streaming it.
-    meta = {"stage": "", "detail": "", "draft": ""}
+    meta = {"stage": "", "detail": "", "draft": "", "trace": []}
 
     def publish(stage: str, detail: str) -> None:
         meta.update(stage=stage, detail=detail)
@@ -82,8 +82,12 @@ def run_pipeline_task(self, job_dir: str, file_paths: list[str], seed_urls: list
         meta["draft"] = text
         self.update_state(state="PROGRESS", meta=dict(meta))
 
+    def publish_step(step: dict) -> None:
+        meta["trace"] = meta["trace"] + [step]
+        self.update_state(state="PROGRESS", meta=dict(meta))
+
     try:
-        with progress.listening(publish, on_draft=publish_draft):
+        with progress.listening(publish, on_draft=publish_draft, on_step=publish_step):
             downloaded: list[str] = []
             failures: list[str] = []
             if arxiv_ids:

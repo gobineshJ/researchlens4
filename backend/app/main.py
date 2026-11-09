@@ -139,7 +139,8 @@ def job_status(job_id: str, user: User = Depends(get_current_user)):
     if result.state == "PROGRESS" and isinstance(result.info, dict):
         response["progress"] = {"stage": result.info.get("stage", ""),
                                 "detail": result.info.get("detail", ""),
-                                "draft": result.info.get("draft", "")}
+                                "draft": result.info.get("draft", ""),
+                                "trace": result.info.get("trace", [])}
     elif result.state == "SUCCESS":
         data = result.result
         if data.get("pdf_filename"):

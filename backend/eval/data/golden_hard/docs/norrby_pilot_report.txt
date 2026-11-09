@@ -1,0 +1,43 @@
+Norrby Municipal Energy Storage Pilot: Final Report
+
+Norrby Energy Department, April 2026
+
+Summary
+
+Between January 2025 and March 2026, the municipality of Norrby operated a 2-megawatt-hour battery installation at its eastern substation to test whether a low-cost sodium-based battery could shift solar power from the middle of the day to the evening peak. The installation used the room-temperature sodium-sulfur chemistry developed by Kade and colleagues at the Halvik Institute of Electrochemistry, built into modules by Fjordcell Assembly. Over 14 months of daily operation, the installation lost 9 percent of its usable capacity and delivered a round-trip efficiency of 87 percent. One module overheated during a heatwave in July 2025 and was replaced. This report describes the installation, its performance, the overheating incident and the costs, and recommends whether Norrby should expand it.
+
+1 Background
+
+Norrby has added 14 megawatts of rooftop and field solar since 2021. On sunny days, generation now exceeds local demand around midday, while the evening peak is still met with power bought from the regional grid at high prices. The energy department proposed a battery pilot in 2024. Lithium-ion systems were considered, but the council asked for a technology with less exposure to imported battery metals, and a sodium-sulfur system operating at room temperature was chosen after a tender in which three suppliers took part.
+
+2 The installation
+
+The installation consists of 40 modules in two weatherproof containers. Each module holds 384 pouch cells of the Halvik chemistry and stores 50 kilowatt-hours. Fjordcell Assembly designed the modules, the cooling system and the battery management system. The containers are air-cooled; they have no liquid cooling, which kept costs down but made the system more sensitive to hot weather, as described below.
+
+The battery charges from the substation between 10:00 and 14:00 and discharges between 17:00 and 21:00 on most days. It completed 402 full equivalent cycles during the pilot.
+
+3 Performance
+
+Capacity. At commissioning, the installation could deliver 2.0 megawatt-hours. After 14 months, it could deliver 1.82 megawatt-hours, a loss of 9 percent. Most of the loss occurred in the two modules nearest the container doors, which saw the widest temperature swings.
+
+Efficiency. Measured over the whole pilot, round-trip efficiency at the grid connection was 87 percent, including the losses of the inverter and the cooling fans.
+
+Availability. The battery was available for 97 percent of scheduled hours. Unavailability was caused mainly by the overheating incident and by two software updates to the battery management system.
+
+4 The July 2025 overheating incident
+
+On 14 July 2025, during a heatwave, the outdoor temperature at the substation reached 43 degrees Celsius. Module 17, near the south wall of container B, exceeded its temperature limit during the afternoon charge, and the battery management system disconnected it automatically. No fire occurred and no other module was affected. Fjordcell Assembly replaced the module within a week. Its investigation found that a cooling fan in module 17 had failed some days earlier without raising an alarm, so the module had been running hotter than its neighbours.
+
+After the incident, fan monitoring was added to the battery management system, and charging power is now reduced automatically when the outdoor temperature exceeds 35 degrees Celsius.
+
+5 Costs
+
+The installed cost of the system, including containers, power electronics, grid connection and commissioning, was 1.15 million euros. The battery modules alone cost 71 US dollars per kilowatt-hour of capacity, as invoiced by Fjordcell Assembly. Savings on evening power purchases came to 96,000 euros over the 14 months.
+
+6 Lessons learned
+
+The chemistry performed close to expectations for capacity retention under daily cycling, but the system is sensitive to heat. Air cooling was adequate for most of the year but not during the heatwave. Any expansion should include better cooling or shading of the containers. The battery management system should monitor every fan and every temperature sensor and alarm on any failure.
+
+7 Recommendation
+
+The energy department recommends expanding the installation to 6 megawatt-hours, with liquid cooling for the new containers, subject to a council decision in late 2026.

@@ -1,0 +1,58 @@
+KestrelCell: A Room-Temperature Sodium-Sulfur Cell with Long Cycle Life
+
+Ilse Kade, Tomasz Wierzba and Noor Haddad
+Halvik Institute of Electrochemistry, 2025
+
+Abstract
+
+Sodium-sulfur batteries are attractive for stationary storage because both elements are abundant and cheap, but the commercial versions run at around 300 degrees Celsius, which adds cost, complexity and safety risk. Room-temperature sodium-sulfur cells avoid the heat but have suffered from short cycle life, because soluble polysulfides shuttle between the electrodes and sodium metal grows dendrites. We describe KestrelCell, a pouch cell that combines a microporous carbon-sulfur cathode with a fluorinated ether electrolyte and a thin sodium-alloy anode coating. In long-term tests, KestrelCell retained 80 percent of its initial capacity after 2,400 full cycles at a 1C rate, more than twice the cycle life of the earlier SodaCore design. We report the cell design, the test protocol, failure analysis of the cells that did not reach the target, and a projected manufacturing cost.
+
+1 Introduction
+
+Grid operators need storage that can be cycled once or twice a day for a decade or more. Lithium-ion batteries dominate this market today, but their materials supply is concentrated in a few countries and prices swing with demand from the vehicle industry. Sodium is found in seawater and rock salt everywhere, and sulfur is a by-product of oil refining, so a sodium-sulfur cell that works at room temperature could, in principle, be built from materials available to any country.
+
+The obstacle is chemistry inside the cell. During discharge, sulfur is reduced through a series of sodium polysulfides. The longer polysulfides dissolve in most liquid electrolytes, drift to the anode and react there, so active material is lost on every cycle. At the same time, sodium metal tends to plate unevenly and form needle-like dendrites, which can pierce the separator and short the cell. Earlier room-temperature designs, including the SodaCore cell reported in 2022, reached about 1,100 cycles before falling to 80 percent capacity, which is too few for daily grid cycling over many years.
+
+Our approach attacks both problems at once. A cathode with very small pores physically traps polysulfides, an electrolyte in which they barely dissolve keeps them from travelling, and an alloy coating on the anode spreads sodium deposition more evenly. None of these ideas is new on its own; the contribution of this work is a combination that survives thousands of cycles in a commercially relevant pouch format rather than in small coin cells.
+
+2 Cell design
+
+The cathode, which we call KS-3, is a carbon-sulfur composite. Sulfur is melted into a microporous carbon whose pores are mostly smaller than one nanometre, at a loading of 3.1 milligrams of sulfur per square centimetre. At this pore size, only short sulfur chains fit inside the carbon, and short chains form polysulfides that are far less soluble than the long ones.
+
+The anode is sodium metal on copper foil, coated with a 2-micrometre layer of a sodium-tin alloy. The alloy layer is sodium-conductive and gives deposition many evenly spaced starting points, which suppresses the growth of individual dendrites.
+
+The separator is a ceramic-coated polyolefin film, 16 micrometres thick. Each pouch cell has a nominal capacity of 2.4 ampere-hours.
+
+3 Methods
+
+Electrolyte. All cells used VX-9, a fluorinated ether electrolyte containing sodium bis(fluorosulfonyl)imide, supplied by Varn Materials. We chose VX-9 after screening eleven commercial and laboratory electrolytes in coin cells; it gave the lowest polysulfide solubility of the candidates that also wetted the ceramic separator well. Each pouch cell received 4.5 grams of electrolyte, filled in a dry room at a dew point of minus 50 degrees Celsius.
+
+Cell assembly. Electrodes were cut by laser, stacked by hand and sealed under vacuum. After filling, cells rested for 12 hours and then went through two formation cycles at a slow rate of 0.05C.
+
+Cycle testing. Long-term cycling was carried out at the Oskarsund Battery Test Centre, an independent laboratory, so that the results would not depend on our own equipment. A total of 24 pouch cells were cycled between 1.2 and 2.8 volts at a 1C rate, following the centre's standard cycle-life protocol. Capacity was measured at the start and every 100 cycles with a slower reference cycle. A cell was counted as having reached end of life when its capacity fell below 80 percent of the value after formation.
+
+Post-mortem analysis. Cells that failed early, and three cells that reached end of life normally, were opened in an argon-filled glovebox and examined by electron microscopy and X-ray photoelectron spectroscopy.
+
+4 Results
+
+Cycle life. The median KestrelCell reached end of life after 2,400 cycles at 1C. The best cell completed 2,910 cycles; the worst of the cells that did not short-circuit completed 2,050. For comparison, the SodaCore design, tested under a similar protocol, reached about 1,100 cycles.
+
+Energy density. At the cell level, including the pouch, tabs and electrolyte, KestrelCell stores 310 watt-hours per kilogram at the start of life. This is lower than the best lithium-ion cells for vehicles, but comparable to lithium iron phosphate cells used in stationary storage.
+
+Efficiency. Round-trip energy efficiency at 1C was 89 percent at the start of life and 85 percent at end of life.
+
+Temperature sensitivity. In a separate set of cells cycled at higher temperatures, capacity fade accelerated sharply above 40 degrees Celsius: at 45 degrees, cells reached end of life after roughly 900 cycles. Post-mortem analysis linked this to faster dissolution of polysulfides as the electrolyte becomes less viscous. Below 40 degrees, temperature had little effect on cycle life.
+
+Failures. Three of the 24 cells short-circuited before reaching 1,500 cycles. In all three, microscopy found dendrites that had grown through defects in the ceramic coating of the separator, at points where the coating was thinner than specified. The remaining 21 cells failed by gradual capacity loss, not by short circuit.
+
+5 Projected cost
+
+Using current bulk prices for sulfur, sodium, carbon and electrolyte, and assuming production at a scale of one gigawatt-hour per year, we estimate a manufacturing cost of 62 US dollars per kilowatt-hour at the cell level. The largest single cost is the electrolyte, which accounts for about a third of the total; the sulfur itself costs less than one dollar per kilowatt-hour.
+
+6 Limitations
+
+Our results come from pouch cells of 2.4 ampere-hours; larger cells may behave differently, especially in how they dissipate heat. The temperature results show that thermal management is essential, because cycle life falls quickly above 40 degrees Celsius. The separator defects that caused the three short circuits point to a quality-control requirement that a manufacturer would have to meet at scale. Finally, the cost projection depends strongly on electrolyte prices, which may change as production grows. We have not measured calendar ageing, that is, capacity loss while cells sit unused, and make no claims about it.
+
+7 Conclusion
+
+Combining a microporous carbon-sulfur cathode, a low-solubility fluorinated ether electrolyte and an alloy-coated sodium anode, KestrelCell reaches 2,400 cycles at room temperature in a practical pouch format. With good thermal management and tighter separator quality control, room-temperature sodium-sulfur cells could become a low-cost option for daily grid storage.

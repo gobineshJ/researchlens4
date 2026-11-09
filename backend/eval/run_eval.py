@@ -66,10 +66,10 @@ def apply_overrides(assignments: list[str]) -> dict:
     (`from .config import X`), so a setting has to be replaced in every
     module that holds its own copy, not just in config.
     """
-    from app import (chunker, config, doc_parser, evaluation, groq_client, hybrid_search,
-                     pipeline, reranker, scraper, vectorstore)
+    from app import (agent, chunker, config, doc_parser, evaluation, groq_client, hybrid_search,
+                     knowledge_graph, pipeline, reranker, scraper, vectorstore)
     modules = [config, pipeline, groq_client, evaluation, reranker, scraper, chunker,
-               doc_parser, hybrid_search, vectorstore]
+               doc_parser, hybrid_search, vectorstore, agent, knowledge_graph]
     applied = {}
     for assignment in assignments:
         name, _, raw = assignment.partition("=")
@@ -131,11 +131,16 @@ def judge_answer(question: str, reference: str, answer: str) -> tuple[float | No
 def run_question(question: dict, docs_dir: Path, counter: _GroqCallCounter, grade: bool) -> dict:
     from app.pipeline import run_pipeline
     doc_names = question.get("docs") or sorted(p.name for p in docs_dir.glob("*.txt"))
+    from app import groq_client
     calls_before, started = counter.count, time.perf_counter()
+    tokens_before = sum(groq_client.usage_totals.values())
     row = {"id": question["id"], "type": question["type"], "question": question["question"]}
     try:
+        # No PDF (it would land among real reports, and nothing scores it)
+        # and no mind map (a Groq call that doesn't affect any metric).
         result = run_pipeline([str(docs_dir / name) for name in doc_names], [], question["question"],
-                              username="eval", run_id=f"eval-{question['id']}")
+                              username="eval", run_id=f"eval-{question['id']}",
+                              export_pdf=False, mind_map=False)
     except Exception as exc:
         row.update(error=f"{type(exc).__name__}: {exc}", seconds=round(time.perf_counter() - started, 1),
                    groq_calls=counter.count - calls_before)
@@ -152,8 +157,13 @@ def run_question(question: dict, docs_dir: Path, counter: _GroqCallCounter, grad
         entailment=metrics.check_value(evaluation, "entailment"),
         groundedness=metrics.check_value(evaluation, "groundedness"),
         hops=metrics.check_value(evaluation, "multi_hop"),
+        agent_steps=metrics.check_value(evaluation, "agent"),
         report_text=report,
         errors=evaluation.get("errors", []),
+        agent_trace=result.get("agent_trace"),
+        # The system's own cost, measured before the answer is graded.
+        groq_calls=counter.count - calls_before,
+        groq_tokens=sum(groq_client.usage_totals.values()) - tokens_before,
     )
     problems = list(row["errors"])
     if grade:
@@ -165,7 +175,7 @@ def run_question(question: dict, docs_dir: Path, counter: _GroqCallCounter, grad
             problems.append(row["answer_reason"])
     if problems:
         row["incomplete"] = "; ".join(p[:200] for p in problems)
-    row.update(groq_calls=counter.count - calls_before, seconds=round(time.perf_counter() - started, 1))
+    row["seconds"] = round(time.perf_counter() - started, 1)
     return row
 
 
@@ -204,10 +214,10 @@ def _complete(rows: list[dict]) -> list[dict]:
     return [r for r in rows if "error" not in r and "incomplete" not in r]
 
 
-def save_results(rows: list[dict], overrides: dict, grade: bool, out_path: Path) -> dict:
+def save_results(rows: list[dict], overrides: dict, grade: bool, out_path: Path, golden: str = "easy") -> dict:
     summary = metrics.aggregate(_complete(rows))
-    out_path.write_text(json.dumps({"overrides": overrides, "judge_answers": grade, "summary": summary,
-                                    "questions": rows}, indent=2), encoding="utf-8")
+    out_path.write_text(json.dumps({"overrides": overrides, "judge_answers": grade, "golden": golden,
+                                    "summary": summary, "questions": rows}, indent=2), encoding="utf-8")
     print()
     print_table(summary)
     skipped = [r["id"] for r in rows if r not in _complete(rows)]
@@ -262,13 +272,18 @@ def main(argv=None) -> None:
                         help="override app/config.py settings for this run")
     parser.add_argument("--tag", default="", help="label for the results file")
     parser.add_argument("--judge-answers", action="store_true", help="grade answers with an LLM")
-    parser.add_argument("--questions", default=str(metrics.GOLDEN_DIR / "questions.jsonl"))
-    parser.add_argument("--docs", default=str(metrics.GOLDEN_DIR / "docs"))
+    parser.add_argument("--golden", choices=["easy", "hard"], default="easy",
+                        help="which golden set: the original one or the hard one (eval/data/golden_hard)")
+    parser.add_argument("--questions", help="questions file (overrides --golden)")
+    parser.add_argument("--docs", help="documents folder (overrides --golden)")
     parser.add_argument("--compare", nargs=2, metavar=("A.json", "B.json"))
     parser.add_argument("--retry-incomplete", metavar="RESULTS.json",
                         help="rerun only that file's failed/incomplete questions, with its settings, "
                              "and save the merged result as a new file")
     args = parser.parse_args(argv)
+    golden_dir = metrics.HARD_DIR if args.golden == "hard" else metrics.GOLDEN_DIR
+    args.questions = args.questions or str(golden_dir / "questions.jsonl")
+    args.docs = args.docs or str(golden_dir / "docs")
 
     if args.compare:
         compare(*args.compare)
@@ -288,6 +303,12 @@ def main(argv=None) -> None:
         questions = [q for q in all_questions if q["id"] in redo]
         overrides = apply_overrides([f"{k}={v}" for k, v in (previous.get("overrides") or {}).items()])
         grade = previous.get("judge_answers", False)
+        if previous.get("golden") and previous["golden"] != args.golden:
+            golden_dir = metrics.HARD_DIR if previous["golden"] == "hard" else metrics.GOLDEN_DIR
+            args.questions, args.docs = str(golden_dir / "questions.jsonl"), str(golden_dir / "docs")
+            args.golden = previous["golden"]
+            all_questions = metrics.load_jsonl(args.questions)
+            questions = [q for q in all_questions if q["id"] in redo]
         tag = Path(args.retry_incomplete).stem.split("_", 1)[1] + "-retry" if "_" in Path(args.retry_incomplete).stem else "retry"
     else:
         questions = [q for q in all_questions
@@ -306,7 +327,7 @@ def main(argv=None) -> None:
     if previous is not None:
         fresh = {r["id"]: r for r in rows}
         rows = [fresh.get(r["id"], r) for r in previous["questions"]]
-    save_results(rows, overrides, grade, out_path)
+    save_results(rows, overrides, grade, out_path, args.golden)
 
 
 if __name__ == "__main__":

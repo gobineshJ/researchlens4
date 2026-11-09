@@ -191,7 +191,7 @@ def test_job_status_running_includes_progress(auth_headers, captured_jobs, monke
     body = client.get(f"/jobs/{job_id}", headers=auth_headers).json()
     assert body["status"] == "running"
     assert body["progress"] == {"stage": "extraction", "detail": "Describing Figure 3 of a.pdf (page 7)",
-                                "draft": ""}
+                                "draft": "", "trace": []}
 
 
 def test_evaluation_history_only_shows_the_callers_runs(auth_headers):

@@ -183,6 +183,8 @@ researchlens/
 │   │   ├── pdf_export.py      # ReportLab PDF generation + Unicode sanitization
 │   │   ├── mindmap.py         # the final report as a graph: question -> themes -> claims -> source documents
 │   │   ├── evaluation.py      # validation checks per stage + persistent run logging
+│   │   ├── agent.py           # agentic retrieval: the tool-calling loop, limits, evidence ledger
+│   │   ├── knowledge_graph.py # rule-based entity/relation graph for the agent's graph tools
 │   │   └── pipeline.py        # orchestrates all stages, including iterative multi-hop retrieval and the self-correction retry loop
 │   ├── eval/                  # measuring quality on a golden set (see "Measuring quality" below)
 │   │   ├── run_eval.py        # runs the real pipeline on every golden question and scores it
@@ -190,6 +192,7 @@ researchlens/
 │   │   ├── export_claims.py   # turns claims from your own runs into a file to label
 │   │   ├── metrics.py         # the scoring functions (unit-tested)
 │   │   ├── data/golden/       # 4 fictional documents + 20 questions with reference answers and evidence
+│   │   ├── data/golden_hard/  # harder set: long documents, look-alike distractors, unnamed bridges (18 questions)
 │   │   └── data/judge_labels.jsonl  # 40 labelled claims for judge agreement
 │   ├── Dockerfile             # one image for the API and the worker
 │   └── tests/
@@ -444,6 +447,42 @@ Each pipeline stage has a real check, not just a "looks fine" assumption. Every 
 | System | Processing time per stage, error count |
 
 **Run history**: every `/process` call appends its evaluation summary (with numeric values, not just pass/fail) to `backend/evaluation_log.jsonl`, tagged with the user who ran it and with the job id as its `run_id`. It is viewable via the "Run history" panel in the UI or the `/evaluation-history` endpoint, and each user only sees their own runs. Entries logged before this change have no user and are therefore hidden from everyone. They are still in the file. This is what makes before/after comparisons (e.g. after changing a threshold or retrieval strategy) an actual query instead of screenshots.
+
+## Agentic retrieval and the knowledge graph
+
+With `AGENT_MODE=on`, retrieval for questions (`targeted_qa` / `analysis`) is done by an **agent**: an LLM that decides, step by step, which tool to call, and when it has enough evidence. Summaries keep positional sampling, which is the right method for them. **Only retrieval is agentic.** The report is still written from the passages the agent chose, and the claim check and revision always run on it, so the agent can never skip verification.
+
+| Tool | What it does |
+|---|---|
+| `search_documents(query)` | The same hybrid search as the fixed pipeline (BM25 + vectors, fused, cross-encoder reranked), over all documents. Returns passage ids with short previews of the part that matched. |
+| `read_passage(id)` | The full text of one passage. |
+| `graph_lookup(entity)` | What the knowledge graph connects to an entity, each link with its sentence and passage id. |
+| `graph_path(a, b)` | The chain of relations linking two entities across documents. |
+| `finish(passage_ids)` | Stop; these passages are the evidence. |
+
+**The knowledge graph** (`app/knowledge_graph.py`) is built from the documents with rules, not an LLM, so it costs no Groq quota and is deterministic:
+- **Entities:** product and standard codes (`VX-9`, `EN 6240`), CamelCase names, multi-word proper names (`Varn Materials`) and names found mid-sentence. A surname seen alone (`Kade`) is merged into the full name seen elsewhere (`Ilse Kade`).
+- **Edges:** entities in the same sentence are strongly linked, labelled with the words between them. Entities in the same passage are weakly linked, which is what connects a paper's title page to a fact in its methods section.
+- **Citable:** every edge keeps its passage id, so anything found through the graph can be cited.
+- **Mentions in search:** with the graph on, search results also list the names each passage mentions. This turned out to matter: without it, the agent saw "developed by Kade and colleagues" only if the preview happened to include that sentence.
+
+**Limits and safety** (`AGENT_MAX_STEPS`, `AGENT_MAX_TOKENS`, `AGENT_MAX_SECONDS`):
+- **Countdown:** every tool result counts down the steps left.
+- **Forced finish:** when a limit is reached, one final call *must* be `finish`, so the agent picks its evidence. Without this, models ran into the step limit, and the fallback handed the writer every passage they had merely seen, look-alikes included.
+- **No wasted repeats:** a repeated or near-identical search is answered with "you already ran this; follow a name instead".
+- **Recoverable rejections:** a tool call Groq rejects for bad arguments gets another try.
+- **Compact context:** older tool results are condensed to their passage ids, so the conversation resent on each step stays small.
+- **Fallback:** if the agent fails or finds nothing, the fixed pipeline runs, and this is recorded as an error.
+
+Each step appears live in the progress box and in the results ("Agent steps").
+
+**Testing without a model:** unit tests drive the loop with a **scripted fake model** that emits tool calls. They cover dispatch, the evidence ledger, every limit, the forced finish, duplicate handling, condensing, rejected calls and fallback. The fake costs no quota and gives exact assertions. A test also guarantees the agent's instructions contain no name from either golden set, because a prompt that hinted at the scored questions would inflate the results.
+
+```bash
+AGENT_MODE=on                  # off (default) | on
+AGENT_GRAPH_TOOLS=true         # give the agent the graph tools and entity mentions
+AGENT_MODEL=qwen/qwen3.8-27b   # chosen by experiment, see below
+```
 
 ## Measuring quality
 

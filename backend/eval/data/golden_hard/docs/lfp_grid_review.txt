@@ -1,0 +1,31 @@
+Lithium Iron Phosphate Batteries for Municipal Grid Storage: A Review of Recent Pilots
+
+Sofie Brandt, Centre for Grid Integration, 2025
+
+1 Introduction
+
+Lithium iron phosphate cells, usually called LFP cells, have become the most common choice for stationary storage. They store less energy per kilogram than the nickel-rich cells used in vehicles, but they last longer, cost less and are far less prone to thermal runaway. This review collects results from municipal LFP pilots reported between 2022 and 2025, with a focus on capacity retention, efficiency and operating problems. It does not cover sodium-based chemistries, which are still at an earlier stage of deployment.
+
+2 The pilots
+
+Norrvik. The town of Norrvik commissioned a 4-megawatt-hour LFP system in 2022 to absorb wind power at night. Over 24 months, the system lost 4 percent of its usable capacity and achieved a round-trip efficiency of 91 percent. The system is liquid-cooled and experienced no thermal incidents, even during the 2023 heat wave.
+
+Ostervik. A 1.5-megawatt-hour system in Ostervik was installed in 2023 to support a fast-charging hub for electric buses. Capacity loss after 18 months was 6 percent, and round-trip efficiency was 88 percent. The operators reported two inverter faults in the first year.
+
+Lundmark. Lundmark's 3-megawatt-hour system, commissioned in 2023, cycles twice a day to follow electricity prices. It lost 7 percent of its capacity in 20 months, which the operator attributes to the higher cycling rate. Efficiency was 90 percent.
+
+3 Testing and certification
+
+Most of the cells in these pilots were tested before deployment at the Drammen Battery Lab, which applies a cycle-life protocol at 25 degrees Celsius and an accelerated ageing protocol at 55 degrees Celsius. Drammen reported cycle lives between 6,000 and 8,000 cycles to 80 percent capacity for the LFP cells used in the three pilots.
+
+4 Costs
+
+Module prices for LFP stationary storage fell from about 140 US dollars per kilowatt-hour in 2022 to about 85 US dollars per kilowatt-hour in 2025. Installed system costs vary widely with the grid connection and site work.
+
+5 Operating lessons
+
+Across the pilots, the most common problems were inverter faults and software issues in the battery management system, not the cells themselves. Liquid cooling added about 8 percent to system cost but kept cell temperatures within 5 degrees of each other, which the operators credit for even ageing across modules. Air-cooled systems showed faster ageing in the modules exposed to the widest temperature swings.
+
+6 Outlook
+
+LFP is likely to remain the default for municipal storage for the rest of the decade. Alternatives will need to compete on cost, on independence from imported materials, or on safety, rather than on energy density.

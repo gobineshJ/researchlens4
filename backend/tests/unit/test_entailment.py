@@ -132,10 +132,32 @@ def test_judge_maps_verdicts_back_to_claims(fake_judge):
 
 
 def test_judge_marks_skipped_claims_unjudged(fake_judge):
-    _, answers = fake_judge
-    answers.append({"verdicts": [{"claim": 1, "verdict": "maybe"}]})
+    calls, answers = fake_judge
+    # Asked once more on its own, then given up on.
+    answers.extend([{"verdicts": [{"claim": 1, "verdict": "maybe"}]}, {"verdicts": []}])
     result = groq_client.judge_claims([{"text": "A holds.", "sources": [1]}], _chunks(100))
     assert result[0]["verdict"] == "unjudged"
+    assert len(calls) == 2
+
+
+def test_judge_asks_again_about_claims_a_reply_skipped(fake_judge):
+    """Qwen answered 10 of 40 claims and stopped -- the rest get a second request."""
+    calls, answers = fake_judge
+    answers.extend([{"verdicts": [{"claim": 1, "verdict": "supported"}]},
+                    {"verdicts": [{"claim": 1, "verdict": "unsupported"}, {"claim": 2, "verdict": "supported"}]}])
+    claims = [{"text": f"Claim {i} holds.", "sources": [1]} for i in range(3)]
+    result = groq_client.judge_claims(claims, _chunks(100))
+    assert [r["verdict"] for r in result] == ["supported", "unsupported", "supported"]
+    assert "Claim 0" not in calls[1] and "Claim 1" in calls[1]
+
+
+def test_judge_batches_are_capped_in_size(fake_judge):
+    calls, answers = fake_judge
+    claims = [{"text": f"Claim {i} holds.", "sources": [1]} for i in range(20)]
+    for size in (8, 8, 4):
+        answers.append({"verdicts": [{"claim": n + 1, "verdict": "supported"} for n in range(size)]})
+    groq_client.judge_claims(claims, _chunks(100))
+    assert [c.count("(cites") for c in calls] == [8, 8, 4]
 
 
 def test_claims_are_batched_to_fit_the_excerpt_budget(fake_judge):

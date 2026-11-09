@@ -38,6 +38,7 @@ from .config import (
     GROQ_API_KEY, GROQ_FILTER_MODEL, GROQ_GENERATION_MODEL, GROQ_MAX_CONTEXT_TOKENS,
     GROQ_VISION_MODEL, QUERY_EXPANSION_VARIANTS, GROQ_RATE_LIMIT_REDIS_URL,
     GROQ_JUDGE_MODEL, ENTAILMENT_MAX_SOURCE_TOKENS, ENTAILMENT_MAX_COMPLETION_TOKENS,
+    ENTAILMENT_MAX_CLAIMS_PER_BATCH,
     MULTI_HOP_EVIDENCE_TOKENS, MIND_MAP_MAX_THEMES, MIND_MAP_MAX_COMPLETION_TOKENS,
 )
 
@@ -381,7 +382,18 @@ def _call_groq(model: str, system_prompt: str, user_prompt: str, json_mode: bool
     return _post_chat(payload)
 
 
-def _read_stream(response, on_text) -> str:
+# Tokens Groq reported per model in this process ({model: tokens}). The
+# eval harness reads the difference before/after a question to compare
+# configurations on cost, not just on call counts.
+usage_totals: dict[str, int] = {}
+
+
+def _record_usage(model: str, usage: dict | None) -> None:
+    if usage and isinstance(usage.get("total_tokens"), int):
+        usage_totals[model] = usage_totals.get(model, 0) + usage["total_tokens"]
+
+
+def _read_stream(response, on_text, model: str = "") -> str:
     """
     Reads a streamed (server-sent events) completion, calling
     on_text(text_so_far) as content arrives, and returns the full text.
@@ -402,8 +414,14 @@ def _read_stream(response, on_text) -> str:
         if data == "[DONE]":
             break
         try:
-            delta = json.loads(data)["choices"][0].get("delta", {})
-        except (ValueError, KeyError, IndexError):
+            event = json.loads(data)
+        except ValueError:
+            continue
+        # The last event carries the usage (Groq puts it under x_groq).
+        _record_usage(model, event.get("usage") or (event.get("x_groq") or {}).get("usage"))
+        try:
+            delta = event["choices"][0].get("delta", {})
+        except (KeyError, IndexError):
             continue
         piece = delta.get("content")
         if piece:
@@ -412,7 +430,7 @@ def _read_stream(response, on_text) -> str:
     return text
 
 
-def _post_chat(payload: dict, timeout: int = 30, on_text=None) -> str:
+def _post_chat(payload: dict, timeout: int = 30, on_text=None, full: bool = False):
     """
     Sends one chat-completions payload and returns the reply text, with
     the retry/error handling every Groq call shares. Split out of
@@ -422,6 +440,10 @@ def _post_chat(payload: dict, timeout: int = 30, on_text=None) -> str:
     With `on_text`, the reply is streamed: on_text(text_so_far) is called
     as it arrives (rate-limit and error handling are unchanged -- those are
     decided by the status code, before any of the body is read).
+
+    With `full`, the whole response body is returned instead of the reply
+    text -- what a tool-calling agent needs, since its replies are often
+    tool calls with no text at all.
     """
     if on_text is not None:
         payload = {**payload, "stream": True}
@@ -493,8 +515,12 @@ def _post_chat(payload: dict, timeout: int = 30, on_text=None) -> str:
                     raise requests.HTTPError(f"{exc} -- Groq said: {(response.text or '')[:500]}",
                                              response=response) from None
             if on_text is not None:
-                return _read_stream(response, on_text)
-            return response.json()["choices"][0]["message"]["content"]
+                return _read_stream(response, on_text, model)
+            body = response.json()
+            _record_usage(model, body.get("usage"))
+            if full:
+                return body
+            return body["choices"][0]["message"]["content"]
 
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
             # Transient network issue (firewall/AV resetting the connection,
@@ -1115,11 +1141,12 @@ def plan_follow_up(instructions: str, evidence: list[dict], tried_queries: list[
 _VERDICTS = ("supported", "unsupported", "contradicted")
 
 
-def _pack_claim_batches(claims: list[dict], chunks: list[dict], max_tokens: int) -> list[list[int]]:
+def _pack_claim_batches(claims: list[dict], chunks: list[dict], max_tokens: int,
+                        max_claims: int = ENTAILMENT_MAX_CLAIMS_PER_BATCH) -> list[list[int]]:
     """
     Groups claim indices so each batch's distinct cited excerpts fit
-    `max_tokens`. Claims citing the same excerpts share a batch for free,
-    so a report built from a handful of excerpts is usually one request.
+    `max_tokens`, with at most `max_claims` claims per batch. Claims citing
+    the same excerpts share a batch for free.
     """
     batches: list[list[int]] = []
     batch: list[int] = []
@@ -1128,7 +1155,7 @@ def _pack_claim_batches(claims: list[dict], chunks: list[dict], max_tokens: int)
         sources = set(claim["sources"])
         combined = batch_sources | sources
         cost = sum(_estimate_tokens(chunks[i - 1]["text"]) for i in combined)
-        if batch and cost > max_tokens:
+        if batch and (cost > max_tokens or len(batch) >= max_claims):
             batches.append(batch)
             batch, batch_sources = [], set()
             combined = sources
@@ -1169,6 +1196,9 @@ def judge_claims(claims: list[dict], chunks: list[dict],
         '"reason": "one short sentence"}, ...]} with one entry per claim, no extra text.'
     )
     pending = _pack_claim_batches(claims, chunks, max_tokens)
+    # Claims a reply skipped get ONE more request of their own -- some
+    # models answer the first part of a list well and then stop early.
+    asked_again: set[int] = set()
     while pending:
         batch = pending.pop(0)
         source_ids = sorted({i for ci in batch for i in claims[ci]["sources"]})
@@ -1208,6 +1238,10 @@ def judge_claims(claims: list[dict], chunks: list[dict],
             verdict = str(entry.get("verdict", "")).strip().lower()
             if 0 <= n < len(batch) and verdict in _VERDICTS:
                 results[batch[n]].update(verdict=verdict, reason=str(entry.get("reason", "") or ""))
+        skipped = [ci for ci in batch if results[ci]["verdict"] == "unjudged" and ci not in asked_again]
+        if skipped:
+            asked_again.update(skipped)
+            pending.append(skipped)
     return results
 
 

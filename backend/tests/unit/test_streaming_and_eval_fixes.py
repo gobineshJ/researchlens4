@@ -85,7 +85,7 @@ def test_grader_never_sees_citation_markers(monkeypatch):
 # ---------- incomplete questions ----------
 
 def _fake_pipeline_with(errors_by_question):
-    def fake(file_paths, seed_urls, instructions, username=None, run_id=None):
+    def fake(file_paths, seed_urls, instructions, username=None, run_id=None, **kwargs):
         return {"retrieved_chunks": [], "report_text": "An answer.",
                 "evaluation": {"checks": [], "errors": errors_by_question.get(run_id, [])}}
     return fake
@@ -135,7 +135,7 @@ def test_retry_incomplete_reruns_only_those_questions_with_the_same_settings(mon
     }))
     ran = []
 
-    def fake(file_paths, seed_urls, instructions, username=None, run_id=None):
+    def fake(file_paths, seed_urls, instructions, username=None, run_id=None, **kwargs):
         ran.append((run_id, pipeline.MULTI_HOP_ENABLED))
         return {"retrieved_chunks": [], "report_text": "x", "evaluation": {"checks": [], "errors": []}}
 

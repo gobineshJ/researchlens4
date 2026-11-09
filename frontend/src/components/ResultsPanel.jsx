@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { downloadFile } from "../api.js";
 import { styles } from "../styles.js";
+import AgentTrace from "./AgentTrace.jsx";
 import ClaimVerdicts from "./ClaimVerdicts.jsx";
 import EvaluationPanel from "./EvaluationPanel.jsx";
 import MindMap from "./MindMap.jsx";
@@ -81,6 +82,8 @@ export default function ResultsPanel({ result }) {
           )}
         </div>
       )}
+
+      <AgentTrace trace={result.agent_trace} />
 
       <ClaimVerdicts verdicts={result.claim_verdicts} />
 

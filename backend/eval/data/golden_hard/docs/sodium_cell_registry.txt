@@ -1,0 +1,83 @@
+Nordic Sodium Cell Registry, 2025 edition
+
+Compiled by the Nordic Battery Forum. The registry lists sodium-based cells whose developers submitted test data during 2024 and 2025. Figures are as reported by the developers and have not been independently verified unless an independent test site is named. Cycle life is given to 80 percent of initial capacity at a 1C rate unless stated otherwise.
+
+Entry 1: SodaCore-X. Developer: Seaborg Energy. Chemistry: room-temperature sodium-sulfur. Electrolyte: NaFE-2, supplied by Ostrand Chemicals. Tested at: Oskarsund Battery Test Centre. Reported cycle life: 2,590 cycles. Cell-level energy density: 275 watt-hours per kilogram. Projected cost: 50 US dollars per kilowatt-hour.
+
+Entry 2: SaltBank. Developer: Lysaker Institute. Chemistry: sodium-ion with a layered oxide cathode. Electrolyte: VX-7, supplied by Varn Materials. Tested at: the developer's own lab. Reported cycle life: 3,040 cycles. Cell-level energy density: 240 watt-hours per kilogram. Projected cost: 51 US dollars per kilowatt-hour.
+
+Entry 3: Kestrel-S. Developer: Tidewater Storage. Chemistry: sodium-ion with a Prussian white cathode. Electrolyte: NaFE-2, supplied by Ostrand Chemicals. Tested at: the developer's own lab. Reported cycle life: 2,190 cycles. Cell-level energy density: 185 watt-hours per kilogram. Projected cost: 62 US dollars per kilowatt-hour.
+
+Entry 4: HarrierCell-6. Developer: Brix Electrolytes. Chemistry: sodium-ion with a layered oxide cathode. Electrolyte: VX-11, supplied by Varn Materials. Tested at: Oskarsund Battery Test Centre. Reported cycle life: 2,830 cycles. Cell-level energy density: 185 watt-hours per kilogram. Projected cost: 67 US dollars per kilowatt-hour.
+
+Entry 5: HarrierCell-9. Developer: Lysaker Institute. Chemistry: sodium-ion with a layered oxide cathode. Electrolyte: VX-7, supplied by Varn Materials. Tested at: Drammen Battery Lab. Reported cycle life: 2,490 cycles. Cell-level energy density: 275 watt-hours per kilogram. Projected cost: 96 US dollars per kilowatt-hour.
+
+Entry 6: KestrelPack. Developer: Brix Electrolytes. Chemistry: sodium-ion with a Prussian white cathode. Electrolyte: SolvaNa, supplied by Ostrand Chemicals. Tested at: the developer's own lab. Reported cycle life: 3,050 cycles. Cell-level energy density: 290 watt-hours per kilogram. Projected cost: 76 US dollars per kilowatt-hour. Capacity fade accelerates above 35 degrees Celsius.
+
+Entry 7: Merlin-Na-3. Developer: Ravnholt University. Chemistry: sodium-ion with a layered oxide cathode. Electrolyte: SolvaNa, supplied by Ostrand Chemicals. Tested at: Oskarsund Battery Test Centre. Reported cycle life: 720 cycles. Cell-level energy density: 200 watt-hours per kilogram. Projected cost: 95 US dollars per kilowatt-hour.
+
+Entry 8: TernCell. Developer: Seaborg Energy. Chemistry: room-temperature sodium-sulfur. Electrolyte: Halyte-4, supplied by Brix Electrolytes. Tested at: Tromsdal Cell Laboratory. Reported cycle life: 1,930 cycles. Cell-level energy density: 260 watt-hours per kilogram. Projected cost: 76 US dollars per kilowatt-hour.
+
+Entry 9: Merlin-Na-2. Developer: Lysaker Institute. Chemistry: room-temperature sodium-sulfur. Electrolyte: SolvaNa, supplied by Ostrand Chemicals. Tested at: Tromsdal Cell Laboratory. Reported cycle life: 1,330 cycles. Cell-level energy density: 315 watt-hours per kilogram. Projected cost: 117 US dollars per kilowatt-hour.
+
+Entry 10: TernCell-4. Developer: Brix Electrolytes. Chemistry: room-temperature sodium-sulfur. Electrolyte: NaFE-2, supplied by Ostrand Chemicals. Tested at: Oskarsund Battery Test Centre. Reported cycle life: 1,740 cycles. Cell-level energy density: 220 watt-hours per kilogram. Projected cost: 107 US dollars per kilowatt-hour. Capacity fade accelerates above 45 degrees Celsius.
+
+Entry 11: KestrelLite-2. Developer: Ravnholt University. Chemistry: sodium-ion with a layered oxide cathode. Electrolyte: Halyte-4, supplied by Brix Electrolytes. Tested at: Tromsdal Cell Laboratory. Reported cycle life: 2,180 cycles. Cell-level energy density: 215 watt-hours per kilogram. Projected cost: 69 US dollars per kilowatt-hour. Capacity fade accelerates above 50 degrees Celsius.
+
+Entry 12: SodaCore-Max-8. Developer: Ostrand Chemicals. Chemistry: sodium-ion with a layered oxide cathode. Electrolyte: VX-11, supplied by Varn Materials. Tested at: Tromsdal Cell Laboratory. Reported cycle life: 1,190 cycles. Cell-level energy density: 260 watt-hours per kilogram. Projected cost: 98 US dollars per kilowatt-hour.
+
+Entry 13: FalconCell-4. Developer: Brix Electrolytes. Chemistry: sodium-ion with a layered oxide cathode. Electrolyte: NaFE-2, supplied by Ostrand Chemicals. Tested at: Oskarsund Battery Test Centre. Reported cycle life: 3,050 cycles. Cell-level energy density: 230 watt-hours per kilogram. Projected cost: 73 US dollars per kilowatt-hour. Calendar life: 13 years (developer estimate).
+
+Entry 14: SodaCore-X-6. Developer: Ravnholt University. Chemistry: room-temperature sodium-sulfur. Electrolyte: NaFE-2, supplied by Ostrand Chemicals. Tested at: Drammen Battery Lab. Reported cycle life: 3,010 cycles. Cell-level energy density: 165 watt-hours per kilogram. Projected cost: 74 US dollars per kilowatt-hour. Calendar life: 15 years (developer estimate).
+
+Entry 15: TernCell-6. Developer: Brix Electrolytes. Chemistry: room-temperature sodium-sulfur. Electrolyte: VX-11, supplied by Varn Materials. Tested at: Drammen Battery Lab. Reported cycle life: 2,750 cycles. Cell-level energy density: 180 watt-hours per kilogram. Projected cost: 118 US dollars per kilowatt-hour.
+
+Entry 16: KestrelPack-3. Developer: Nordhavn Technical University. Chemistry: sodium-ion with a Prussian white cathode. Electrolyte: VX-7, supplied by Varn Materials. Tested at: the developer's own lab. Reported cycle life: 1,640 cycles. Cell-level energy density: 200 watt-hours per kilogram. Projected cost: 88 US dollars per kilowatt-hour.
+
+Entry 17: KestrelPack-9. Developer: Brix Electrolytes. Chemistry: sodium-ion with a Prussian white cathode. Electrolyte: VX-11, supplied by Varn Materials. Tested at: the developer's own lab. Reported cycle life: 780 cycles. Cell-level energy density: 165 watt-hours per kilogram. Projected cost: 95 US dollars per kilowatt-hour. Capacity fade accelerates above 40 degrees Celsius.
+
+Entry 18: HarrierCell-1. Developer: Ravnholt University. Chemistry: sodium-ion with a layered oxide cathode. Electrolyte: SolvaNa, supplied by Ostrand Chemicals. Tested at: the developer's own lab. Reported cycle life: 2,440 cycles. Cell-level energy density: 245 watt-hours per kilogram. Projected cost: 48 US dollars per kilowatt-hour. Calendar life: 18 years (developer estimate).
+
+Entry 19: SodaCore-Max. Developer: Nordhavn Technical University. Chemistry: room-temperature sodium-sulfur. Electrolyte: NaFE-2, supplied by Ostrand Chemicals. Tested at: the developer's own lab. Reported cycle life: 1,960 cycles. Cell-level energy density: 310 watt-hours per kilogram. Projected cost: 95 US dollars per kilowatt-hour.
+
+Entry 20: SodaCore-X-1. Developer: Tidewater Storage. Chemistry: sodium-ion with a layered oxide cathode. Electrolyte: VX-7, supplied by Varn Materials. Tested at: Oskarsund Battery Test Centre. Reported cycle life: 1,730 cycles. Cell-level energy density: 135 watt-hours per kilogram. Projected cost: 61 US dollars per kilowatt-hour.
+
+Entry 21: SodaCore-Max-2. Developer: Lysaker Institute. Chemistry: sodium-ion with a layered oxide cathode. Electrolyte: VX-11, supplied by Varn Materials. Tested at: Tromsdal Cell Laboratory. Reported cycle life: 870 cycles. Cell-level energy density: 180 watt-hours per kilogram. Projected cost: 92 US dollars per kilowatt-hour.
+
+Entry 22: SodaCore-X-5. Developer: Ravnholt University. Chemistry: room-temperature sodium-sulfur. Electrolyte: VX-11, supplied by Varn Materials. Tested at: the developer's own lab. Reported cycle life: 1,830 cycles. Cell-level energy density: 150 watt-hours per kilogram. Projected cost: 59 US dollars per kilowatt-hour. Calendar life: 19 years (developer estimate).
+
+Entry 23: TernCell-3. Developer: Seaborg Energy. Chemistry: sodium-ion with a Prussian white cathode. Electrolyte: SolvaNa, supplied by Ostrand Chemicals. Tested at: Drammen Battery Lab. Reported cycle life: 1,410 cycles. Cell-level energy density: 290 watt-hours per kilogram. Projected cost: 64 US dollars per kilowatt-hour.
+
+Entry 24: KestrelPack-6. Developer: Ravnholt University. Chemistry: room-temperature sodium-sulfur. Electrolyte: VX-11, supplied by Varn Materials. Tested at: Drammen Battery Lab. Reported cycle life: 2,330 cycles. Cell-level energy density: 120 watt-hours per kilogram. Projected cost: 106 US dollars per kilowatt-hour.
+
+Entry 25: Merlin-Na-4. Developer: Seaborg Energy. Chemistry: sodium-ion with a Prussian white cathode. Electrolyte: VX-7, supplied by Varn Materials. Tested at: Tromsdal Cell Laboratory. Reported cycle life: 740 cycles. Cell-level energy density: 260 watt-hours per kilogram. Projected cost: 66 US dollars per kilowatt-hour.
+
+Entry 26: Kestrel-S-3. Developer: Seaborg Energy. Chemistry: room-temperature sodium-sulfur. Electrolyte: NaFE-2, supplied by Ostrand Chemicals. Tested at: Tromsdal Cell Laboratory. Reported cycle life: 1,760 cycles. Cell-level energy density: 130 watt-hours per kilogram. Projected cost: 104 US dollars per kilowatt-hour. Calendar life: 17 years (developer estimate).
+
+Entry 27: SodaCore-Max-4. Developer: Ostrand Chemicals. Chemistry: sodium-ion with a Prussian white cathode. Electrolyte: VX-7, supplied by Varn Materials. Tested at: Drammen Battery Lab. Reported cycle life: 2,690 cycles. Cell-level energy density: 225 watt-hours per kilogram. Projected cost: 94 US dollars per kilowatt-hour. Capacity fade accelerates above 35 degrees Celsius.
+
+Entry 28: Kestrel-S-2. Developer: Ravnholt University. Chemistry: room-temperature sodium-sulfur. Electrolyte: SolvaNa, supplied by Ostrand Chemicals. Tested at: Oskarsund Battery Test Centre. Reported cycle life: 2,670 cycles. Cell-level energy density: 180 watt-hours per kilogram. Projected cost: 62 US dollars per kilowatt-hour.
+
+Entry 29: KestrelLite-4. Developer: Seaborg Energy. Chemistry: sodium-ion with a layered oxide cathode. Electrolyte: VX-11, supplied by Varn Materials. Tested at: the developer's own lab. Reported cycle life: 980 cycles. Cell-level energy density: 255 watt-hours per kilogram. Projected cost: 94 US dollars per kilowatt-hour.
+
+Entry 30: KestrelLite. Developer: Lysaker Institute. Chemistry: room-temperature sodium-sulfur. Electrolyte: Halyte-4, supplied by Brix Electrolytes. Tested at: Tromsdal Cell Laboratory. Reported cycle life: 1,670 cycles. Cell-level energy density: 320 watt-hours per kilogram. Projected cost: 107 US dollars per kilowatt-hour.
+
+Entry 31: Gannet-S-6. Developer: Nordhavn Technical University. Chemistry: room-temperature sodium-sulfur. Electrolyte: Halyte-4, supplied by Brix Electrolytes. Tested at: the developer's own lab. Reported cycle life: 2,930 cycles. Cell-level energy density: 150 watt-hours per kilogram. Projected cost: 116 US dollars per kilowatt-hour. Capacity fade accelerates above 35 degrees Celsius.
+
+Entry 32: Kestrel-S-4. Developer: Brix Electrolytes. Chemistry: room-temperature sodium-sulfur. Electrolyte: SolvaNa, supplied by Ostrand Chemicals. Tested at: Oskarsund Battery Test Centre. Reported cycle life: 700 cycles. Cell-level energy density: 185 watt-hours per kilogram. Projected cost: 96 US dollars per kilowatt-hour.
+
+Entry 33: SodaCore-Max-1. Developer: Ostrand Chemicals. Chemistry: room-temperature sodium-sulfur. Electrolyte: SolvaNa, supplied by Ostrand Chemicals. Tested at: Oskarsund Battery Test Centre. Reported cycle life: 1,990 cycles. Cell-level energy density: 260 watt-hours per kilogram. Projected cost: 68 US dollars per kilowatt-hour.
+
+Entry 34: TernCell-9. Developer: Lysaker Institute. Chemistry: sodium-ion with a layered oxide cathode. Electrolyte: Halyte-4, supplied by Brix Electrolytes. Tested at: Oskarsund Battery Test Centre. Reported cycle life: 2,230 cycles. Cell-level energy density: 135 watt-hours per kilogram. Projected cost: 57 US dollars per kilowatt-hour.
+
+Entry 35: OspreyPack-5. Developer: Lysaker Institute. Chemistry: sodium-ion with a layered oxide cathode. Electrolyte: Halyte-4, supplied by Brix Electrolytes. Tested at: Drammen Battery Lab. Reported cycle life: 2,550 cycles. Cell-level energy density: 280 watt-hours per kilogram. Projected cost: 58 US dollars per kilowatt-hour. Calendar life: 13 years (developer estimate). Capacity fade accelerates above 45 degrees Celsius.
+
+Entry 36: OspreyPack-1. Developer: Tidewater Storage. Chemistry: room-temperature sodium-sulfur. Electrolyte: Halyte-4, supplied by Brix Electrolytes. Tested at: Tromsdal Cell Laboratory. Reported cycle life: 2,410 cycles. Cell-level energy density: 290 watt-hours per kilogram. Projected cost: 49 US dollars per kilowatt-hour. Capacity fade accelerates above 35 degrees Celsius.
+
+Entry 37: Merlin-Na-9. Developer: Seaborg Energy. Chemistry: sodium-ion with a Prussian white cathode. Electrolyte: VX-7, supplied by Varn Materials. Tested at: the developer's own lab. Reported cycle life: 3,140 cycles. Cell-level energy density: 315 watt-hours per kilogram. Projected cost: 73 US dollars per kilowatt-hour.
+
+Entry 38: KestrelLite-1. Developer: Brix Electrolytes. Chemistry: sodium-ion with a layered oxide cathode. Electrolyte: Halyte-4, supplied by Brix Electrolytes. Tested at: Oskarsund Battery Test Centre. Reported cycle life: 1,460 cycles. Cell-level energy density: 200 watt-hours per kilogram. Projected cost: 72 US dollars per kilowatt-hour.
+
+Entry 39: HarrierCell. Developer: Lysaker Institute. Chemistry: sodium-ion with a Prussian white cathode. Electrolyte: VX-7, supplied by Varn Materials. Tested at: the developer's own lab. Reported cycle life: 2,810 cycles. Cell-level energy density: 240 watt-hours per kilogram. Projected cost: 113 US dollars per kilowatt-hour. Calendar life: 17 years (developer estimate).
+
+Entry 40: TernCell-1. Developer: Brix Electrolytes. Chemistry: room-temperature sodium-sulfur. Electrolyte: VX-7, supplied by Varn Materials. Tested at: Oskarsund Battery Test Centre. Reported cycle life: 3,070 cycles. Cell-level energy density: 290 watt-hours per kilogram. Projected cost: 90 US dollars per kilowatt-hour.

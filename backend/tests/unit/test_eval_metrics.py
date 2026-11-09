@@ -101,7 +101,7 @@ def test_run_question_scores_a_pipeline_result(monkeypatch, tmp_path):
     from app import pipeline
     seen = {}
 
-    def fake_pipeline(file_paths, seed_urls, instructions, username=None, run_id=None):
+    def fake_pipeline(file_paths, seed_urls, instructions, username=None, run_id=None, **kwargs):
         seen.update(files=file_paths, username=username)
         return {
             "retrieved_chunks": [{"text": "HelixNet was pre-trained and fine-tuned on the TerraNotes corpus"}],

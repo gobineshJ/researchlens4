@@ -1,0 +1,47 @@
+Varn Materials: Annual Technical Report on Battery Electrolytes, 2025
+
+Prepared by the Quality and Technical Services department. Chief chemist: Dr. Rune Aaland.
+
+1 About this report
+
+Varn Materials makes liquid electrolytes for battery research groups and cell manufacturers. This report summarises the specifications, production, quality results and incidents for our three electrolyte product lines during the 2024 calendar year. It is written for customers who need to qualify our products for their own cells and for auditors who review our quality system.
+
+Our electrolytes are sold under the VX product family. VX-7 is a carbonate-based electrolyte for sodium-ion cells. VX-9 is a fluorinated ether electrolyte with sodium bis(fluorosulfonyl)imide salt, designed for sodium-sulfur and sodium-metal cells, where polysulfide dissolution and anode stability are the main concerns. VX-11 is a high-voltage formulation for sodium-ion cells with layered oxide cathodes.
+
+2 Production
+
+Each product is made at a single site, so that every batch of a product shares the same equipment and raw-material suppliers. VX-7 and VX-11 are produced at our Solberg plant. VX-9 is produced only at our Brekke plant, which has a dedicated line for fluorinated solvents and a dry room held below minus 60 degrees Celsius dew point. In 2024 the Brekke plant produced 186 batches of VX-9, each of 200 litres.
+
+Raw materials are tested on arrival. Salts are dried under vacuum before use, and solvents are distilled and stored over molecular sieves. All mixing happens in sealed vessels under dry argon.
+
+3 Specifications
+
+VX-9 is supplied with the following specification. Water content must not exceed 20 parts per million, measured by Karl Fischer titration. Free acid, expressed as hydrofluoric acid, must not exceed 30 parts per million. Ionic conductivity at 25 degrees Celsius must be at least 4.5 millisiemens per centimetre. The flash point of VX-9 is 112 degrees Celsius, which is considerably higher than that of typical carbonate electrolytes and is one reason the product is chosen for large-format cells.
+
+VX-7 is specified at no more than 15 parts per million water and has a flash point of 31 degrees Celsius. VX-11 is specified at no more than 10 parts per million water and has a flash point of 38 degrees Celsius.
+
+4 Quality results for 2024
+
+Every batch is tested before release. For VX-9, the average water content across the 186 batches released in 2024 was 12 parts per million, with the highest single batch at 18 parts per million. No VX-9 batch was rejected for water. Two VX-9 batches were rejected for low conductivity and were not shipped. Average free acid was 9 parts per million.
+
+For VX-7, average water content was 8 parts per million. For VX-11, it was 6 parts per million.
+
+Customer complaints in 2024 numbered 14 in total: nine about delivery times, three about labelling and two about product quality. Both quality complaints concerned VX-7 and were connected to the incident described in the next section.
+
+5 Incidents
+
+In March 2024 we recalled eleven batches of VX-7 after customers reported unexpected gas generation in their cells. Our investigation traced the problem to chloride contamination in one delivery of a solvent from an outside supplier. The contaminated solvent was used only at the Solberg plant, and only for VX-7. VX-9 and VX-11 were not affected by the recall, because VX-9 is made from different solvents at the Brekke plant and the affected VX-11 batches had not used that delivery. We have since added a chloride test to incoming solvent inspection at both plants.
+
+There were no safety incidents involving injuries at either plant in 2024.
+
+6 Customers and applications
+
+VX-9 is used mainly by university and institute groups developing room-temperature sodium-sulfur cells, and by two pilot-scale manufacturers. Customers typically use between 3 and 6 grams of electrolyte per ampere-hour of cell capacity. We recommend that cells filled with VX-9 rest for at least 8 hours before formation, so that the electrolyte fully wets the electrodes.
+
+7 Pricing and supply
+
+The list price of VX-9 in 2024 was 140 euros per litre for orders under 100 litres and 95 euros per litre for larger orders. We expect the price to fall as the Brekke line runs at higher volume. VX-9 has a shelf life of 18 months when stored unopened below 30 degrees Celsius.
+
+8 Plans for 2025
+
+We plan to double VX-9 capacity at the Brekke plant by the end of 2025 and to introduce VX-9L, a lower-cost variant with a cheaper salt. VX-9L is still in development and has not been released to customers.

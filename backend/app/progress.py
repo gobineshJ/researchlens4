@@ -16,20 +16,25 @@ from typing import Callable
 
 _listener: ContextVar[Callable[[str, str], None] | None] = ContextVar("progress_listener", default=None)
 _draft_listener: ContextVar[Callable[[str], None] | None] = ContextVar("draft_listener", default=None)
+_step_listener: ContextVar[Callable[[dict], None] | None] = ContextVar("step_listener", default=None)
 _current_stage: ContextVar[str] = ContextVar("progress_stage", default="")
 
 
 @contextmanager
-def listening(callback: Callable[[str, str], None], on_draft: Callable[[str], None] | None = None):
+def listening(callback: Callable[[str, str], None], on_draft: Callable[[str], None] | None = None,
+              on_step: Callable[[dict], None] | None = None):
     """callback(stage, detail) is called on every update inside this block;
-    on_draft(text), if given, on every update of the report being written."""
+    on_draft(text), if given, on every update of the report being written;
+    on_step(step), if given, on every tool call the retrieval agent makes."""
     token = _listener.set(callback)
     draft_token = _draft_listener.set(on_draft)
+    step_token = _step_listener.set(on_step)
     try:
         yield
     finally:
         _listener.reset(token)
         _draft_listener.reset(draft_token)
+        _step_listener.reset(step_token)
 
 
 def stage(name: str) -> None:
@@ -60,5 +65,16 @@ def draft(text: str) -> None:
         return
     try:
         callback(text)
+    except Exception:
+        pass  # a progress update must never fail the pipeline
+
+
+def agent_step(step: dict) -> None:
+    """One tool call by the retrieval agent, for the UI's live step trace."""
+    callback = _step_listener.get()
+    if callback is None:
+        return
+    try:
+        callback(step)
     except Exception:
         pass  # a progress update must never fail the pipeline

@@ -55,6 +55,8 @@ export const styles = {
     font: "inherit",
     textDecoration: "underline dotted",
   },
+  trace: { margin: "0.4rem 0 0", paddingLeft: "1.4rem", fontSize: "0.9rem" },
+  traceStep: { marginBottom: "0.35rem" },
   citationActive: { background: "#dbe8fb", borderRadius: 3 },
   tabs: { display: "flex", border: "1px solid #ccc", borderRadius: 6, overflow: "hidden" },
   tab: { padding: "0.35rem 0.9rem", fontSize: "0.88rem", border: "none", background: "#fff", cursor: "pointer" },
